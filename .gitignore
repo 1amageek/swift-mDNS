@@ -1,0 +1,38 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+*.xcscmblueprint
+*.xccheckout
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# IDE
+*.idea/
+*.vscode/
+
+# Credentials
+.netrc
+
+# Build artifacts
+Packages/
+*.o
+*.a
+*.dylib
+
+# Test outputs
+*.xcresult/
+coverage/
+
+# Benchmarks
+Benchmarks/.build/
