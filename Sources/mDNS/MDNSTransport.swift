@@ -106,8 +106,13 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
         self.allocator = ByteBufferAllocator()
 
         // Create UDP transport configured for multicast
-        var udpConfig = UDPConfiguration.multicast(port: Int(mdnsPort))
-        udpConfig.networkInterface = configuration.networkInterface
+        let udpConfig = UDPConfiguration(
+            bindAddress: .any(port: Int(mdnsPort)),
+            reuseAddress: true,
+            reusePort: true,
+            networkInterface: configuration.networkInterface,
+            streamBufferSize: 200
+        )
         self.udpTransport = NIOUDPTransport(configuration: udpConfig)
 
         self.state = Mutex(State())
