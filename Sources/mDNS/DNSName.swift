@@ -38,8 +38,12 @@ public struct DNSName: Sendable, Hashable, CustomStringConvertible {
         let parts = normalized.split(separator: ".", omittingEmptySubsequences: false)
         var labels: [String] = []
 
-        for part in parts {
+        for (index, part) in parts.enumerated() {
             let label = String(part)
+            // RFC 1035: Empty labels only allowed at root (end of name)
+            if label.isEmpty {
+                throw DNSError.invalidName("Empty label at position \(index) in name")
+            }
             guard label.count <= dnsMaxLabelLength else {
                 throw DNSError.invalidName("Label exceeds maximum length: \(label)")
             }
@@ -159,8 +163,19 @@ public struct DNSName: Sendable, Hashable, CustomStringConvertible {
                 }
                 jumped = true
 
+                // Validate pointer offset (RFC 1035: must point to valid prior name)
+                guard pointer < count else {
+                    throw DNSError.invalidMessage("Compression pointer offset \(pointer) beyond message bounds")
+                }
                 currentOffset = pointer
                 continue
+            }
+
+            // Check for reserved label types (RFC 1035 Section 4.1.4)
+            // 01xxxxxx (0x40-0x7F): Extended label type (RFC 6891)
+            // 10xxxxxx (0x80-0xBF): Reserved for future use
+            if (length & 0xC0) != 0 {
+                throw DNSError.invalidMessage("Reserved label type: 0x\(String(length, radix: 16, uppercase: true))")
             }
 
             // Regular label
@@ -212,6 +227,25 @@ extension DNSName: Equatable {
     }
 }
 
+// MARK: - Hashable
+
+extension DNSName {
+    /// Hash must be case-insensitive to match equality (RFC 1035).
+    ///
+    /// This ensures the Hashable contract is satisfied: equal objects must have equal hashes.
+    public func hash(into hasher: inout Hasher) {
+        for label in labels {
+            // Normalize to lowercase for consistent hashing (ASCII only)
+            for byte in label.utf8 {
+                let normalized = (byte >= 0x41 && byte <= 0x5A) ? byte + 32 : byte
+                hasher.combine(normalized)
+            }
+            // Separator between labels to distinguish "a.bc" from "ab.c"
+            hasher.combine(UInt8(0))
+        }
+    }
+}
+
 /// Fast ASCII case-insensitive string comparison (no allocation).
 @inlinable
 func asciiCaseInsensitiveEqual(_ a: String, _ b: String) -> Bool {
@@ -241,6 +275,10 @@ func asciiCaseInsensitiveEqual(_ a: String, _ b: String) -> Bool {
 
 extension DNSName: ExpressibleByStringLiteral {
     public init(stringLiteral value: String) {
-        try! self.init(value)
+        do {
+            try self.init(value)
+        } catch {
+            fatalError("DNSName init failed for string: '\(value)' - Error: \(error)")
+        }
     }
 }
