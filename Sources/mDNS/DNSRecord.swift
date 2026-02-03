@@ -569,36 +569,44 @@ public struct IPv4Address: Sendable, CustomStringConvertible {
 
     @inlinable
     public init?(string: String) {
-        // Fast path: manual parsing without split() allocation
-        var bytes: (UInt8, UInt8, UInt8, UInt8) = (0, 0, 0, 0)
-        var octetIndex = 0
-        var currentValue: UInt16 = 0
-        var hasDigit = false
+        // Ultra-fast path: direct memory access
+        let result = string.utf8.withContiguousStorageIfAvailable { utf8Bytes -> (UInt8, UInt8, UInt8, UInt8)? in
+            guard utf8Bytes.count >= 7, utf8Bytes.count <= 15 else { return nil }
 
-        for char in string.utf8 {
-            if char == UInt8(ascii: ".") {
-                guard hasDigit, currentValue <= 255, octetIndex < 3 else { return nil }
-                switch octetIndex {
-                case 0: bytes.0 = UInt8(currentValue)
-                case 1: bytes.1 = UInt8(currentValue)
-                case 2: bytes.2 = UInt8(currentValue)
-                default: return nil
+            var bytes: (UInt8, UInt8, UInt8, UInt8) = (0, 0, 0, 0)
+            var octetIndex = 0
+            var currentValue: UInt16 = 0
+            var hasDigit = false
+
+            for i in 0..<utf8Bytes.count {
+                let char = utf8Bytes[i]
+                if char == UInt8(ascii: ".") {
+                    guard hasDigit, currentValue <= 255, octetIndex < 3 else { return nil }
+                    switch octetIndex {
+                    case 0: bytes.0 = UInt8(currentValue)
+                    case 1: bytes.1 = UInt8(currentValue)
+                    case 2: bytes.2 = UInt8(currentValue)
+                    default: return nil
+                    }
+                    octetIndex += 1
+                    currentValue = 0
+                    hasDigit = false
+                } else if char >= UInt8(ascii: "0") && char <= UInt8(ascii: "9") {
+                    currentValue = currentValue * 10 + UInt16(char - UInt8(ascii: "0"))
+                    guard currentValue <= 255 else { return nil }
+                    hasDigit = true
+                } else {
+                    return nil
                 }
-                octetIndex += 1
-                currentValue = 0
-                hasDigit = false
-            } else if char >= UInt8(ascii: "0") && char <= UInt8(ascii: "9") {
-                currentValue = currentValue * 10 + UInt16(char - UInt8(ascii: "0"))
-                guard currentValue <= 255 else { return nil }
-                hasDigit = true
-            } else {
-                return nil
             }
+
+            // Last octet
+            guard hasDigit, currentValue <= 255, octetIndex == 3 else { return nil }
+            bytes.3 = UInt8(currentValue)
+            return bytes
         }
 
-        // Last octet
-        guard hasDigit, currentValue <= 255, octetIndex == 3 else { return nil }
-        bytes.3 = UInt8(currentValue)
+        guard let bytes = result ?? nil else { return nil }
         self.bytes = bytes
     }
 
@@ -685,151 +693,159 @@ public struct IPv6Address: Sendable, CustomStringConvertible {
 
     @inlinable
     public init?(string: String) {
-        // Zero-allocation fast path using stack buffer
-        var groups: (UInt16, UInt16, UInt16, UInt16, UInt16, UInt16, UInt16, UInt16) = (0, 0, 0, 0, 0, 0, 0, 0)
-        var groupCount = 0
-        var currentValue: UInt16 = 0
-        var hasDigit = false
-        var doubleColonPos = -1
-        var lastWasColon = false
+        // Ultra-fast path: direct memory access
+        let result = string.utf8.withContiguousStorageIfAvailable { utf8Bytes -> (UInt64, UInt64)? in
+            guard utf8Bytes.count >= 2, utf8Bytes.count <= 39 else { return nil }
 
-        for char in string.utf8 {
-            if char == UInt8(ascii: ":") {
-                if lastWasColon {
-                    // Found ::
-                    guard doubleColonPos < 0 else { return nil } // Multiple :: not allowed
-                    doubleColonPos = groupCount
-                    lastWasColon = false
-                    continue
-                }
-                if hasDigit {
-                    guard groupCount < 8 else { return nil }
-                    switch groupCount {
-                    case 0: groups.0 = currentValue
-                    case 1: groups.1 = currentValue
-                    case 2: groups.2 = currentValue
-                    case 3: groups.3 = currentValue
-                    case 4: groups.4 = currentValue
-                    case 5: groups.5 = currentValue
-                    case 6: groups.6 = currentValue
-                    case 7: groups.7 = currentValue
-                    default: return nil
+            var groups: (UInt16, UInt16, UInt16, UInt16, UInt16, UInt16, UInt16, UInt16) = (0, 0, 0, 0, 0, 0, 0, 0)
+            var groupCount = 0
+            var currentValue: UInt16 = 0
+            var hasDigit = false
+            var doubleColonPos = -1
+            var lastWasColon = false
+
+            for i in 0..<utf8Bytes.count {
+                let char = utf8Bytes[i]
+                if char == UInt8(ascii: ":") {
+                    if lastWasColon {
+                        // Found ::
+                        guard doubleColonPos < 0 else { return nil } // Multiple :: not allowed
+                        doubleColonPos = groupCount
+                        lastWasColon = false
+                        continue
                     }
-                    groupCount += 1
-                    currentValue = 0
-                    hasDigit = false
-                }
-                lastWasColon = true
-            } else {
-                lastWasColon = false
-                // Parse hex digit
-                let digit: UInt16
-                if char >= UInt8(ascii: "0") && char <= UInt8(ascii: "9") {
-                    digit = UInt16(char - UInt8(ascii: "0"))
-                } else if char >= UInt8(ascii: "a") && char <= UInt8(ascii: "f") {
-                    digit = UInt16(char - UInt8(ascii: "a") + 10)
-                } else if char >= UInt8(ascii: "A") && char <= UInt8(ascii: "F") {
-                    digit = UInt16(char - UInt8(ascii: "A") + 10)
+                    if hasDigit {
+                        guard groupCount < 8 else { return nil }
+                        switch groupCount {
+                        case 0: groups.0 = currentValue
+                        case 1: groups.1 = currentValue
+                        case 2: groups.2 = currentValue
+                        case 3: groups.3 = currentValue
+                        case 4: groups.4 = currentValue
+                        case 5: groups.5 = currentValue
+                        case 6: groups.6 = currentValue
+                        case 7: groups.7 = currentValue
+                        default: return nil
+                        }
+                        groupCount += 1
+                        currentValue = 0
+                        hasDigit = false
+                    }
+                    lastWasColon = true
                 } else {
-                    return nil
+                    lastWasColon = false
+                    // Parse hex digit
+                    let digit: UInt16
+                    if char >= UInt8(ascii: "0") && char <= UInt8(ascii: "9") {
+                        digit = UInt16(char - UInt8(ascii: "0"))
+                    } else if char >= UInt8(ascii: "a") && char <= UInt8(ascii: "f") {
+                        digit = UInt16(char - UInt8(ascii: "a") + 10)
+                    } else if char >= UInt8(ascii: "A") && char <= UInt8(ascii: "F") {
+                        digit = UInt16(char - UInt8(ascii: "A") + 10)
+                    } else {
+                        return nil
+                    }
+                    currentValue = (currentValue << 4) | digit
+                    hasDigit = true
                 }
-                currentValue = (currentValue << 4) | digit
-                hasDigit = true
-            }
-        }
-
-        // Last group
-        if hasDigit {
-            guard groupCount < 8 else { return nil }
-            switch groupCount {
-            case 0: groups.0 = currentValue
-            case 1: groups.1 = currentValue
-            case 2: groups.2 = currentValue
-            case 3: groups.3 = currentValue
-            case 4: groups.4 = currentValue
-            case 5: groups.5 = currentValue
-            case 6: groups.6 = currentValue
-            case 7: groups.7 = currentValue
-            default: return nil
-            }
-            groupCount += 1
-        }
-
-        // Helper to get group value by index
-        func getGroup(_ index: Int, from tuple: (UInt16, UInt16, UInt16, UInt16, UInt16, UInt16, UInt16, UInt16)) -> UInt16 {
-            switch index {
-            case 0: return tuple.0
-            case 1: return tuple.1
-            case 2: return tuple.2
-            case 3: return tuple.3
-            case 4: return tuple.4
-            case 5: return tuple.5
-            case 6: return tuple.6
-            case 7: return tuple.7
-            default: return 0
-            }
-        }
-
-        // Expand :: if present
-        var final: (UInt16, UInt16, UInt16, UInt16, UInt16, UInt16, UInt16, UInt16)
-        if doubleColonPos >= 0 {
-            let zerosNeeded = 8 - groupCount
-            guard zerosNeeded >= 0 else { return nil }
-
-            // Build final array with :: expansion
-            final = (0, 0, 0, 0, 0, 0, 0, 0)
-            var srcIdx = 0
-            var destIdx = 0
-
-            // Copy before ::
-            while destIdx < doubleColonPos {
-                let val = getGroup(srcIdx, from: groups)
-                switch destIdx {
-                case 0: final.0 = val
-                case 1: final.1 = val
-                case 2: final.2 = val
-                case 3: final.3 = val
-                case 4: final.4 = val
-                case 5: final.5 = val
-                case 6: final.6 = val
-                case 7: final.7 = val
-                default: break
-                }
-                srcIdx += 1
-                destIdx += 1
             }
 
-            // Skip zeros
-            destIdx += zerosNeeded
-
-            // Copy after ::
-            while srcIdx < groupCount {
-                let val = getGroup(srcIdx, from: groups)
-                switch destIdx {
-                case 0: final.0 = val
-                case 1: final.1 = val
-                case 2: final.2 = val
-                case 3: final.3 = val
-                case 4: final.4 = val
-                case 5: final.5 = val
-                case 6: final.6 = val
-                case 7: final.7 = val
+            // Last group
+            if hasDigit {
+                guard groupCount < 8 else { return nil }
+                switch groupCount {
+                case 0: groups.0 = currentValue
+                case 1: groups.1 = currentValue
+                case 2: groups.2 = currentValue
+                case 3: groups.3 = currentValue
+                case 4: groups.4 = currentValue
+                case 5: groups.5 = currentValue
+                case 6: groups.6 = currentValue
+                case 7: groups.7 = currentValue
                 default: return nil
                 }
-                srcIdx += 1
-                destIdx += 1
+                groupCount += 1
             }
-        } else {
-            guard groupCount == 8 else { return nil }
-            final = groups
+
+            // Helper to get group value by index
+            func getGroup(_ index: Int) -> UInt16 {
+                switch index {
+                case 0: return groups.0
+                case 1: return groups.1
+                case 2: return groups.2
+                case 3: return groups.3
+                case 4: return groups.4
+                case 5: return groups.5
+                case 6: return groups.6
+                case 7: return groups.7
+                default: return 0
+                }
+            }
+
+            // Expand :: if present
+            var final: (UInt16, UInt16, UInt16, UInt16, UInt16, UInt16, UInt16, UInt16)
+            if doubleColonPos >= 0 {
+                let zerosNeeded = 8 - groupCount
+                guard zerosNeeded >= 0 else { return nil }
+
+                // Build final array with :: expansion
+                final = (0, 0, 0, 0, 0, 0, 0, 0)
+                var srcIdx = 0
+                var destIdx = 0
+
+                // Copy before ::
+                while destIdx < doubleColonPos {
+                    let val = getGroup(srcIdx)
+                    switch destIdx {
+                    case 0: final.0 = val
+                    case 1: final.1 = val
+                    case 2: final.2 = val
+                    case 3: final.3 = val
+                    case 4: final.4 = val
+                    case 5: final.5 = val
+                    case 6: final.6 = val
+                    case 7: final.7 = val
+                    default: break
+                    }
+                    srcIdx += 1
+                    destIdx += 1
+                }
+
+                // Skip zeros
+                destIdx += zerosNeeded
+
+                // Copy after ::
+                while srcIdx < groupCount {
+                    let val = getGroup(srcIdx)
+                    switch destIdx {
+                    case 0: final.0 = val
+                    case 1: final.1 = val
+                    case 2: final.2 = val
+                    case 3: final.3 = val
+                    case 4: final.4 = val
+                    case 5: final.5 = val
+                    case 6: final.6 = val
+                    case 7: final.7 = val
+                    default: return nil
+                    }
+                    srcIdx += 1
+                    destIdx += 1
+                }
+            } else {
+                guard groupCount == 8 else { return nil }
+                final = groups
+            }
+
+            let hiVal = (UInt64(final.0) << 48) | (UInt64(final.1) << 32) | (UInt64(final.2) << 16) | UInt64(final.3)
+            let loVal = (UInt64(final.4) << 48) | (UInt64(final.5) << 32) | (UInt64(final.6) << 16) | UInt64(final.7)
+            return (hiVal, loVal)
         }
 
-        let hiVal = (UInt64(final.0) << 48) | (UInt64(final.1) << 32) | (UInt64(final.2) << 16) | UInt64(final.3)
-        let loVal = (UInt64(final.4) << 48) | (UInt64(final.5) << 32) | (UInt64(final.6) << 16) | UInt64(final.7)
-
+        guard let (hiVal, loVal) = result ?? nil else { return nil }
         self.hi = hiVal
         self.lo = loVal
     }
+
 
     /// Returns raw bytes as Data (for compatibility).
     @inlinable
