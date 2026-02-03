@@ -62,8 +62,9 @@ public struct MDNSTransportConfiguration: Sendable {
 
 /// NIO-based mDNS transport implementation.
 ///
-/// Uses `NIOUDPTransport` for UDP multicast communication with zero-copy
-/// ByteBuffer encoding/decoding for optimal performance.
+/// Uses separate `NIOUDPTransport` instances for IPv4 and IPv6 to properly
+/// handle multicast group membership. Each address family requires its own
+/// socket bound to the appropriate address (0.0.0.0 for IPv4, :: for IPv6).
 ///
 /// ## Example
 /// ```swift
@@ -84,7 +85,11 @@ public struct MDNSTransportConfiguration: Sendable {
 public final class NIODNSTransport: MDNSTransport, Sendable {
 
     private let configuration: MDNSTransportConfiguration
-    private let udpTransport: NIOUDPTransport
+
+    // Separate transports for IPv4 and IPv6
+    private let ipv4Transport: NIOUDPTransport?
+    private let ipv6Transport: NIOUDPTransport?
+
     private let allocator: ByteBufferAllocator
 
     /// Stream of received DNS messages.
@@ -93,7 +98,8 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
 
     private struct State: Sendable {
         var isStarted: Bool = false
-        var receiveTask: Task<Void, Never>?
+        var ipv4ReceiveTask: Task<Void, Never>?
+        var ipv6ReceiveTask: Task<Void, Never>?
     }
 
     private let state: Mutex<State>
@@ -105,15 +111,33 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
         self.configuration = configuration
         self.allocator = ByteBufferAllocator()
 
-        // Create UDP transport configured for multicast
-        let udpConfig = UDPConfiguration(
-            bindAddress: .any(port: Int(mdnsPort)),
-            reuseAddress: true,
-            reusePort: true,
-            networkInterface: configuration.networkInterface,
-            streamBufferSize: 200
-        )
-        self.udpTransport = NIOUDPTransport(configuration: udpConfig)
+        // Create IPv4 transport if enabled
+        if configuration.useIPv4 {
+            let ipv4Config = UDPConfiguration(
+                bindAddress: .ipv4Any(port: Int(mdnsPort)),
+                reuseAddress: true,
+                reusePort: true,
+                networkInterface: configuration.networkInterface,
+                streamBufferSize: 200
+            )
+            self.ipv4Transport = NIOUDPTransport(configuration: ipv4Config)
+        } else {
+            self.ipv4Transport = nil
+        }
+
+        // Create IPv6 transport if enabled
+        if configuration.useIPv6 {
+            let ipv6Config = UDPConfiguration(
+                bindAddress: .ipv6Any(port: Int(mdnsPort)),
+                reuseAddress: true,
+                reusePort: true,
+                networkInterface: configuration.networkInterface,
+                streamBufferSize: 200
+            )
+            self.ipv6Transport = NIOUDPTransport(configuration: ipv6Config)
+        } else {
+            self.ipv6Transport = nil
+        }
 
         self.state = Mutex(State())
 
@@ -137,55 +161,59 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
 
         guard !alreadyStarted else { return }
 
-        // Start UDP transport
-        try await udpTransport.start()
-
-        // Join multicast groups
-        if configuration.useIPv4 {
-            try await udpTransport.joinMulticastGroup(
+        // Start IPv4 transport and join multicast group
+        if let ipv4Transport = ipv4Transport {
+            try await ipv4Transport.start()
+            try await ipv4Transport.joinMulticastGroup(
                 mdnsIPv4Address,
                 on: configuration.networkInterface
             )
+            startReceiving(from: ipv4Transport, isIPv4: true)
         }
 
-        if configuration.useIPv6 {
-            try await udpTransport.joinMulticastGroup(
+        // Start IPv6 transport and join multicast group
+        if let ipv6Transport = ipv6Transport {
+            try await ipv6Transport.start()
+            try await ipv6Transport.joinMulticastGroup(
                 mdnsIPv6Address,
                 on: configuration.networkInterface
             )
+            startReceiving(from: ipv6Transport, isIPv4: false)
         }
-
-        // Start receiving messages
-        startReceiving()
     }
 
     /// Stops the transport.
     public func stop() async {
-        let task = state.withLock { state -> Task<Void, Never>? in
+        let tasks = state.withLock { state -> (Task<Void, Never>?, Task<Void, Never>?) in
             state.isStarted = false
-            let t = state.receiveTask
-            state.receiveTask = nil
-            return t
+            let ipv4Task = state.ipv4ReceiveTask
+            let ipv6Task = state.ipv6ReceiveTask
+            state.ipv4ReceiveTask = nil
+            state.ipv6ReceiveTask = nil
+            return (ipv4Task, ipv6Task)
         }
 
-        task?.cancel()
+        tasks.0?.cancel()
+        tasks.1?.cancel()
 
-        // Leave multicast groups
-        if configuration.useIPv4 {
-            try? await udpTransport.leaveMulticastGroup(
+        // Stop IPv4 transport
+        if let ipv4Transport = ipv4Transport {
+            try? await ipv4Transport.leaveMulticastGroup(
                 mdnsIPv4Address,
                 on: configuration.networkInterface
             )
+            await ipv4Transport.stop()
         }
 
-        if configuration.useIPv6 {
-            try? await udpTransport.leaveMulticastGroup(
+        // Stop IPv6 transport
+        if let ipv6Transport = ipv6Transport {
+            try? await ipv6Transport.leaveMulticastGroup(
                 mdnsIPv6Address,
                 on: configuration.networkInterface
             )
+            await ipv6Transport.stop()
         }
 
-        await udpTransport.stop()
         messagesContinuation.finish()
     }
 
@@ -196,16 +224,18 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
         // Encode directly to ByteBuffer (zero-copy path)
         let buffer = message.encodeToByteBuffer(allocator: allocator)
 
-        if configuration.useIPv4 {
-            try await udpTransport.sendMulticast(
+        // Send to IPv4 multicast group
+        if let ipv4Transport = ipv4Transport {
+            try await ipv4Transport.sendMulticast(
                 buffer,
                 to: mdnsIPv4Address,
                 port: Int(mdnsPort)
             )
         }
 
-        if configuration.useIPv6 {
-            try await udpTransport.sendMulticast(
+        // Send to IPv6 multicast group
+        if let ipv6Transport = ipv6Transport {
+            try await ipv6Transport.sendMulticast(
                 buffer,
                 to: mdnsIPv6Address,
                 port: Int(mdnsPort)
@@ -218,16 +248,37 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
     /// Uses zero-copy ByteBuffer encoding for optimal performance.
     public func send(_ message: DNSMessage, to address: SocketAddress) async throws {
         let buffer = message.encodeToByteBuffer(allocator: allocator)
-        try await udpTransport.send(buffer, to: address)
+
+        // Determine which transport to use based on address family
+        switch address {
+        case .v4:
+            guard let ipv4Transport = ipv4Transport else {
+                throw NSError(domain: "mDNS", code: -1, userInfo: [
+                    NSLocalizedDescriptionKey: "IPv4 transport not available"
+                ])
+            }
+            try await ipv4Transport.send(buffer, to: address)
+        case .v6:
+            guard let ipv6Transport = ipv6Transport else {
+                throw NSError(domain: "mDNS", code: -1, userInfo: [
+                    NSLocalizedDescriptionKey: "IPv6 transport not available"
+                ])
+            }
+            try await ipv6Transport.send(buffer, to: address)
+        case .unixDomainSocket:
+            throw NSError(domain: "mDNS", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "Unix domain sockets not supported for mDNS"
+            ])
+        }
     }
 
     // MARK: - Private
 
-    private func startReceiving() {
+    private func startReceiving(from transport: NIOUDPTransport, isIPv4: Bool) {
         let task = Task { [weak self] in
             guard let self = self else { return }
 
-            for await datagram in self.udpTransport.incomingDatagrams {
+            for await datagram in transport.incomingDatagrams {
                 // Decode DNS message directly from ByteBuffer (zero-copy)
                 do {
                     let message = try DNSMessage.decode(from: datagram.buffer)
@@ -239,12 +290,18 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
                 } catch {
                     // Ignore malformed messages
                     #if DEBUG
-                    print("mDNS decode error: \(error)")
+                    print("mDNS decode error (\(isIPv4 ? "IPv4" : "IPv6")): \(error)")
                     #endif
                 }
             }
         }
 
-        state.withLock { $0.receiveTask = task }
+        state.withLock { state in
+            if isIPv4 {
+                state.ipv4ReceiveTask = task
+            } else {
+                state.ipv6ReceiveTask = task
+            }
+        }
     }
 }
