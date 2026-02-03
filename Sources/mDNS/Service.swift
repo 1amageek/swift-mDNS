@@ -110,58 +110,155 @@ public struct Service: Sendable, Hashable, Identifiable {
 ///
 /// Per RFC 6763 Section 6, TXT records contain zero or more strings,
 /// each in the format "key=value" or just "key" for boolean attributes.
+///
+/// This implementation supports both DNS-SD (single value per key) and
+/// libp2p extensions (multiple values per key, e.g., multiple `dnsaddr=` entries).
+///
+/// ## Design
+///
+/// - **Storage**: Raw DNS wire format (`[String]`) with index for O(1) lookup
+/// - **DNS-SD API**: `subscript` returns first value only (RFC 6763 compliant)
+/// - **libp2p API**: `values(forKey:)`, `appendValue(_:forKey:)` for multiple values
 public struct TXTRecord: Sendable, Hashable {
 
-    /// The raw key-value pairs.
-    public private(set) var attributes: [String: String]
+    // MARK: - Storage
+
+    /// DNS本来の形式（順序保持）
+    private var rawStrings: [String]
+
+    /// 高速アクセス用インデックス（キー → 文字列配列内のインデックス）
+    private var index: [String: [Int]]
+
+    // MARK: - Initialization
 
     /// Creates an empty TXT record.
     public init() {
-        self.attributes = [:]
-    }
-
-    /// Creates a TXT record from key-value pairs.
-    public init(_ attributes: [String: String]) {
-        self.attributes = attributes
+        self.rawStrings = []
+        self.index = [:]
     }
 
     /// Creates a TXT record from DNS TXT strings.
     public init(strings: [String]) {
-        var attrs: [String: String] = [:]
-        for string in strings {
-            if let equalIndex = string.firstIndex(of: "=") {
-                let key = String(string[..<equalIndex])
-                let value = String(string[string.index(after: equalIndex)...])
-                attrs[key.lowercased()] = value
-            } else if !string.isEmpty {
-                // Boolean attribute
-                attrs[string.lowercased()] = ""
+        // Filter out empty strings (per RFC 6763 Section 6.1)
+        self.rawStrings = strings.filter { !$0.isEmpty }
+        self.index = Self.buildIndex(from: rawStrings)
+    }
+
+    /// Creates a TXT record from key-value pairs.
+    public init(_ attributes: [String: String]) {
+        self.rawStrings = attributes.map { key, value in
+            value.isEmpty ? key : "\(key)=\(value)"
+        }.sorted()
+        self.index = Self.buildIndex(from: rawStrings)
+    }
+
+    // MARK: - DNS-SD Compatible API (single value)
+
+    /// Gets or sets the first value for a key (case-insensitive).
+    ///
+    /// Per RFC 6763, keys SHOULD NOT appear more than once.
+    /// This subscript follows that convention by returning only the first value.
+    public subscript(key: String) -> String? {
+        get { values(forKey: key).first }
+        set {
+            removeValues(forKey: key)
+            if let newValue {
+                appendValue(newValue, forKey: key)
             }
         }
-        self.attributes = attrs
     }
 
-    /// Gets a value for a key (case-insensitive).
-    public subscript(key: String) -> String? {
-        get { attributes[key.lowercased()] }
-        set { attributes[key.lowercased()] = newValue }
-    }
-
-    /// Whether the TXT record contains a key.
+    /// Whether the TXT record contains a key (case-insensitive).
     public func contains(_ key: String) -> Bool {
-        attributes[key.lowercased()] != nil
+        !values(forKey: key).isEmpty
     }
+
+    // MARK: - libp2p Extended API (multiple values)
+
+    /// Returns all values for a key (case-insensitive).
+    ///
+    /// Use this when you need to access multiple values for the same key
+    /// (e.g., libp2p's multiple `dnsaddr=` entries).
+    public func values(forKey key: String) -> [String] {
+        let lowercasedKey = key.lowercased()
+        guard let indices = index[lowercasedKey] else { return [] }
+        return indices.compactMap { idx in
+            parseValue(from: rawStrings[idx], key: lowercasedKey)
+        }
+    }
+
+    /// Appends a value for a key (case-insensitive).
+    ///
+    /// Unlike subscript assignment (which replaces all values),
+    /// this method adds a new value while preserving existing ones.
+    public mutating func appendValue(_ value: String, forKey key: String) {
+        let string = value.isEmpty ? key : "\(key)=\(value)"
+        rawStrings.append(string)
+        let newIndex = rawStrings.count - 1
+        let lowercasedKey = key.lowercased()
+        index[lowercasedKey, default: []].append(newIndex)
+    }
+
+    /// Sets all values for a key (case-insensitive), replacing any existing values.
+    public mutating func setValues(_ values: [String], forKey key: String) {
+        removeValues(forKey: key)
+        for value in values {
+            appendValue(value, forKey: key)
+        }
+    }
+
+    /// Removes all values for a key (case-insensitive).
+    public mutating func removeValues(forKey key: String) {
+        let lowercasedKey = key.lowercased()
+        guard let indices = index[lowercasedKey] else { return }
+
+        // 逆順で削除（インデックスずれ防止）
+        for idx in indices.sorted().reversed() {
+            rawStrings.remove(at: idx)
+        }
+
+        // インデックス再構築
+        index = Self.buildIndex(from: rawStrings)
+    }
+
+    // MARK: - Wire Format
 
     /// Converts to DNS TXT string format.
     public func toStrings() -> [String] {
-        attributes.map { key, value in
-            value.isEmpty ? key : "\(key)=\(value)"
-        }.sorted()
+        rawStrings
     }
 
     /// Whether this TXT record is empty.
     public var isEmpty: Bool {
-        attributes.isEmpty
+        rawStrings.isEmpty
+    }
+
+    // MARK: - Helpers
+
+    private static func buildIndex(from strings: [String]) -> [String: [Int]] {
+        var index: [String: [Int]] = [:]
+        for (idx, string) in strings.enumerated() {
+            if let equalIndex = string.firstIndex(of: "=") {
+                let key = String(string[..<equalIndex]).lowercased()
+                index[key, default: []].append(idx)
+            } else if !string.isEmpty {
+                let key = string.lowercased()
+                index[key, default: []].append(idx)
+            }
+        }
+        return index
+    }
+
+    private func parseValue(from string: String, key: String) -> String? {
+        if let equalIndex = string.firstIndex(of: "=") {
+            let k = String(string[..<equalIndex]).lowercased()
+            if k == key {
+                return String(string[string.index(after: equalIndex)...])
+            }
+        } else if string.lowercased() == key {
+            return ""  // Boolean attribute
+        }
+        return nil
     }
 }
 
