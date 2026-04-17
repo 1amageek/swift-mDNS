@@ -163,7 +163,10 @@ public struct DNSName: Sendable, Hashable, CustomStringConvertible {
                 }
                 jumped = true
 
-                // Validate pointer offset (RFC 1035: must point to valid prior name)
+                // RFC 1035 compression pointers must point backwards to prior data.
+                guard pointer < currentOffset else {
+                    throw DNSError.invalidMessage("Compression pointer offset \(pointer) must point backward")
+                }
                 guard pointer < count else {
                     throw DNSError.invalidMessage("Compression pointer offset \(pointer) beyond message bounds")
                 }

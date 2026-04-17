@@ -6,6 +6,16 @@ import Testing
 import Foundation
 @testable import mDNS
 
+private actor FakeMDNSTransport: MDNSTransport {
+    let messages: AsyncStream<ReceivedDNSMessage> = AsyncStream { continuation in
+        continuation.finish()
+    }
+
+    func start() async throws {}
+    func shutdown() async throws {}
+    func send(_ message: DNSMessage) async throws {}
+}
+
 @Suite("Error Handling - Malformed Message Detection")
 struct ErrorHandlingTests {
 
@@ -230,6 +240,25 @@ struct ErrorHandlingTests {
         #expect(throws: DNSError.self) {
             _ = try DNSMessage.decode(from: data)
         }
+    }
+
+    @Test("ServiceAdvertiser rejects invalid service names instead of crashing")
+    func serviceAdvertiserRejectsInvalidServiceNames() async throws {
+        let advertiser = ServiceAdvertiser(transport: FakeMDNSTransport())
+        try await advertiser.start()
+
+        let invalidService = Service(
+            name: "bad",
+            type: String(repeating: "a", count: 64),
+            hostName: "host.local",
+            port: 8080
+        )
+
+        await #expect(throws: DNSError.self) {
+            try await advertiser.register(invalidService)
+        }
+
+        try await advertiser.shutdown()
     }
 
     @Test("Truncated TXT record string")

@@ -145,6 +145,19 @@ struct RFC1035Tests {
         }
     }
 
+    @Test("Compression pointer forward reference throws error")
+    func pointerForwardReference() throws {
+        // Offset 0 points forward to offset 2, which RFC 1035 forbids.
+        var data = Data()
+        data.append(0xC0)
+        data.append(0x02)
+        data.append(0x00)
+
+        #expect(throws: DNSError.self) {
+            _ = try DNSName.decode(from: data, at: 0)
+        }
+    }
+
     // MARK: - Section 3.1: Name space definitions
 
     @Test("Root domain encoding")

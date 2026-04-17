@@ -5,7 +5,24 @@
 import Foundation
 import NIOCore
 import NIOUDPTransport
+import os
 import Synchronization
+
+#if DEBUG
+private let nioDNSTransportDebugLoggingEnabled =
+    ProcessInfo.processInfo.environment["NIO_DNS_TRANSPORT_DEBUG"] == "1"
+#else
+private let nioDNSTransportDebugLoggingEnabled = false
+#endif
+
+private let nioDNSTransportLogger = Logger(subsystem: "mDNS", category: "Transport")
+
+@inline(__always)
+private func nioDNSDebugLog(_ message: @autoclosure () -> String) {
+    guard nioDNSTransportDebugLoggingEnabled else { return }
+    let text = message()
+    nioDNSTransportLogger.debug("\(text, privacy: .public)")
+}
 
 /// Protocol for mDNS transport operations.
 public protocol MDNSTransport: Sendable {
@@ -13,7 +30,7 @@ public protocol MDNSTransport: Sendable {
     func start() async throws
 
     /// Stops the transport.
-    func stop() async
+    func shutdown() async throws
 
     /// Sends a DNS message to the mDNS multicast groups.
     func send(_ message: DNSMessage) async throws
@@ -163,27 +180,33 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
 
         // Start IPv4 transport and join multicast group
         if let ipv4Transport = ipv4Transport {
+            nioDNSDebugLog("[NIODNSTransport] Starting IPv4 transport on port \(mdnsPort)...")
             try await ipv4Transport.start()
+            let v4Addr = await ipv4Transport.localAddress
+            nioDNSDebugLog("[NIODNSTransport] IPv4 transport bound to \(v4Addr.map(String.init(describing:)) ?? "nil")")
             try await ipv4Transport.joinMulticastGroup(
                 mdnsIPv4Address,
                 on: configuration.networkInterface
             )
+            nioDNSDebugLog("[NIODNSTransport] IPv4 joined multicast group \(mdnsIPv4Address)")
             startReceiving(from: ipv4Transport, isIPv4: true)
         }
 
         // Start IPv6 transport and join multicast group
         if let ipv6Transport = ipv6Transport {
+            nioDNSDebugLog("[NIODNSTransport] Starting IPv6 transport on port \(mdnsPort)...")
             try await ipv6Transport.start()
             try await ipv6Transport.joinMulticastGroup(
                 mdnsIPv6Address,
                 on: configuration.networkInterface
             )
+            nioDNSDebugLog("[NIODNSTransport] IPv6 joined multicast group \(mdnsIPv6Address)")
             startReceiving(from: ipv6Transport, isIPv4: false)
         }
     }
 
     /// Stops the transport.
-    public func stop() async {
+    public func shutdown() async throws {
         let tasks = state.withLock { state -> (Task<Void, Never>?, Task<Void, Never>?) in
             state.isStarted = false
             let ipv4Task = state.ipv4ReceiveTask
@@ -198,20 +221,12 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
 
         // Stop IPv4 transport
         if let ipv4Transport = ipv4Transport {
-            try? await ipv4Transport.leaveMulticastGroup(
-                mdnsIPv4Address,
-                on: configuration.networkInterface
-            )
-            await ipv4Transport.stop()
+            try await ipv4Transport.shutdown()
         }
 
         // Stop IPv6 transport
         if let ipv6Transport = ipv6Transport {
-            try? await ipv6Transport.leaveMulticastGroup(
-                mdnsIPv6Address,
-                on: configuration.networkInterface
-            )
-            await ipv6Transport.stop()
+            try await ipv6Transport.shutdown()
         }
 
         messagesContinuation.finish()
@@ -219,27 +234,51 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
 
     /// Sends a DNS message to the mDNS multicast groups.
     ///
-    /// Uses zero-copy ByteBuffer encoding for optimal performance.
+    /// Sends to both IPv4 and IPv6 multicast groups. Succeeds if at least one
+    /// transport sends successfully. Only throws if all enabled transports fail.
     public func send(_ message: DNSMessage) async throws {
         // Encode directly to ByteBuffer (zero-copy path)
         let buffer = message.encodeToByteBuffer(allocator: allocator)
+        var lastError: Error?
+        var sent = false
 
         // Send to IPv4 multicast group
         if let ipv4Transport = ipv4Transport {
-            try await ipv4Transport.sendMulticast(
-                buffer,
-                to: mdnsIPv4Address,
-                port: Int(mdnsPort)
-            )
+            nioDNSDebugLog("[NIODNSTransport] send: IPv4 → \(mdnsIPv4Address):\(mdnsPort), \(buffer.readableBytes) bytes")
+            do {
+                try await ipv4Transport.sendMulticast(
+                    buffer,
+                    to: mdnsIPv4Address,
+                    port: Int(mdnsPort)
+                )
+                sent = true
+                nioDNSDebugLog("[NIODNSTransport] send: IPv4 OK")
+            } catch {
+                lastError = error
+                nioDNSDebugLog("[NIODNSTransport] send: IPv4 FAILED: \(error)")
+            }
         }
 
         // Send to IPv6 multicast group
         if let ipv6Transport = ipv6Transport {
-            try await ipv6Transport.sendMulticast(
-                buffer,
-                to: mdnsIPv6Address,
-                port: Int(mdnsPort)
-            )
+            nioDNSDebugLog("[NIODNSTransport] send: IPv6 → \(mdnsIPv6Address):\(mdnsPort), \(buffer.readableBytes) bytes")
+            do {
+                try await ipv6Transport.sendMulticast(
+                    buffer,
+                    to: mdnsIPv6Address,
+                    port: Int(mdnsPort)
+                )
+                sent = true
+                nioDNSDebugLog("[NIODNSTransport] send: IPv6 OK")
+            } catch {
+                lastError = error
+                nioDNSDebugLog("[NIODNSTransport] send: IPv6 FAILED: \(error)")
+            }
+        }
+
+        // Only throw if no transport succeeded
+        if !sent, let error = lastError {
+            throw error
         }
     }
 
@@ -289,9 +328,7 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
                     self.messagesContinuation.yield(received)
                 } catch {
                     // Ignore malformed messages
-                    #if DEBUG
-                    print("mDNS decode error (\(isIPv4 ? "IPv4" : "IPv6")): \(error)")
-                    #endif
+                    nioDNSDebugLog("mDNS decode error (\(isIPv4 ? "IPv4" : "IPv6")): \(error)")
                 }
             }
         }

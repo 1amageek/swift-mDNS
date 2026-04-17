@@ -126,7 +126,7 @@ public actor ServiceBrowser {
             self.eventContinuation = continuation
 
             continuation.onTermination = { @Sendable _ in
-                Task { await self.stop() }
+                Task { await self.shutdownOnTermination() }
             }
         }
     }
@@ -150,7 +150,7 @@ public actor ServiceBrowser {
     }
 
     /// Stops the service browser.
-    public func stop() async {
+    public func shutdown() async throws {
         guard isStarted else { return }
         isStarted = false
 
@@ -160,7 +160,7 @@ public actor ServiceBrowser {
         queryTask?.cancel()
         queryTask = nil
 
-        await transport.stop()
+        try await transport.shutdown()
 
         eventContinuation?.finish()
         eventContinuation = nil
@@ -168,7 +168,15 @@ public actor ServiceBrowser {
         browsingTypes.removeAll()
         services.removeAll()
 
-        logger?.info("ServiceBrowser stopped")
+        logger?.info("ServiceBrowser shutdown")
+    }
+
+    private func shutdownOnTermination() async {
+        do {
+            try await shutdown()
+        } catch {
+            logger?.error("ServiceBrowser termination shutdown failed: \(error)")
+        }
     }
 
     /// Starts browsing for a service type.
@@ -319,10 +327,30 @@ public actor ServiceBrowser {
             // Auto-resolve if enabled
             if configuration.autoResolve {
                 Task { [weak self] in
-                    try? await self?.resolve(service)
+                    guard let self else { return }
+                    do {
+                        _ = try await self.resolve(service)
+                    } catch let dnsError as DNSError {
+                        await self.reportAutoResolveFailure(
+                            dnsError,
+                            serviceName: service.fullName
+                        )
+                    } catch {
+                        await self.reportAutoResolveFailure(
+                            DNSError.networkError(
+                                "Auto-resolve failed for \(service.fullName): \(error)"
+                            ),
+                            serviceName: service.fullName
+                        )
+                    }
                 }
             }
         }
+    }
+
+    private func reportAutoResolveFailure(_ error: DNSError, serviceName: String) {
+        eventContinuation?.yield(.error(error))
+        logger?.debug("Auto-resolve failed for \(serviceName): \(error)")
     }
 
     private func handleSRVRecord(answer: DNSResourceRecord, srv: SRVRecord) async {

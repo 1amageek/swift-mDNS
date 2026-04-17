@@ -140,7 +140,7 @@ public actor ServiceAdvertiser {
             self.eventContinuation = continuation
 
             continuation.onTermination = { @Sendable _ in
-                Task { await self.stop() }
+                Task { await self.shutdownOnTermination() }
             }
         }
     }
@@ -169,7 +169,7 @@ public actor ServiceAdvertiser {
     }
 
     /// Stops the service advertiser.
-    public func stop() async {
+    public func shutdown() async throws {
         guard isStarted else { return }
         isStarted = false
 
@@ -184,14 +184,22 @@ public actor ServiceAdvertiser {
         refreshTask?.cancel()
         refreshTask = nil
 
-        await transport.stop()
+        try await transport.shutdown()
 
         eventContinuation?.finish()
         eventContinuation = nil
 
         registeredServices.removeAll()
 
-        logger?.info("ServiceAdvertiser stopped")
+        logger?.info("ServiceAdvertiser shutdown")
+    }
+
+    private func shutdownOnTermination() async {
+        do {
+            try await shutdown()
+        } catch {
+            logger?.error("ServiceAdvertiser termination shutdown failed: \(error)")
+        }
     }
 
     /// Registers a service for advertising.
@@ -221,6 +229,8 @@ public actor ServiceAdvertiser {
         if serviceToRegister.ipv6Addresses.isEmpty {
             serviceToRegister.ipv6Addresses = hostAddresses6
         }
+
+        _ = try makeAllRecords(for: serviceToRegister)
 
         registeredServices[serviceToRegister.fullName] = serviceToRegister
 
@@ -333,12 +343,16 @@ public actor ServiceAdvertiser {
             if question.type == .ptr || question.type == .any {
                 for service in registeredServices.values {
                     if questionName == service.fullType {
-                        // Add PTR record pointing to the service instance
-                        let ptrRecord = makePTRRecord(for: service)
-                        answers.append(ptrRecord)
+                        do {
+                            // Add PTR record pointing to the service instance
+                            let ptrRecord = try makePTRRecord(for: service)
+                            answers.append(ptrRecord)
 
-                        // Add SRV, TXT, and address records as additional
-                        additional.append(contentsOf: makeServiceRecords(for: service))
+                            // Add SRV, TXT, and address records as additional
+                            additional.append(contentsOf: try makeServiceRecords(for: service))
+                        } catch {
+                            logger?.debug("Failed to build PTR response records: \(error)")
+                        }
                     }
                 }
             }
@@ -346,7 +360,11 @@ public actor ServiceAdvertiser {
             // Check SRV/TXT queries for specific service instances
             if question.type == .srv || question.type == .txt || question.type == .any {
                 if let service = registeredServices[questionName] {
-                    additional.append(contentsOf: makeServiceRecords(for: service))
+                    do {
+                        additional.append(contentsOf: try makeServiceRecords(for: service))
+                    } catch {
+                        logger?.debug("Failed to build SRV/TXT response records: \(error)")
+                    }
                 }
             }
 
@@ -354,7 +372,11 @@ public actor ServiceAdvertiser {
             if question.type == .a || question.type == .aaaa || question.type == .any {
                 for service in registeredServices.values {
                     if let hostName = service.hostName, question.name.name == hostName {
-                        additional.append(contentsOf: makeAddressRecords(for: service))
+                        do {
+                            additional.append(contentsOf: try makeAddressRecords(for: service))
+                        } catch {
+                            logger?.debug("Failed to build address response records: \(error)")
+                        }
                     }
                 }
             }
@@ -378,7 +400,7 @@ public actor ServiceAdvertiser {
     }
 
     private func announce(service: Service) async throws {
-        let records = makeAllRecords(for: service)
+        let records = try makeAllRecords(for: service)
 
         let response = DNSMessage.response(
             id: 0,
@@ -399,27 +421,26 @@ public actor ServiceAdvertiser {
     }
 
     private func sendGoodbye(for service: Service) async {
-        let records = makeAllRecords(for: service)
-        let goodbyeMessage = DNSMessage.mdnsGoodbye(records: records)
-
         do {
+            let records = try makeAllRecords(for: service)
+            let goodbyeMessage = DNSMessage.mdnsGoodbye(records: records)
             try await transport.send(goodbyeMessage)
         } catch {
             logger?.debug("Failed to send goodbye: \(error)")
         }
     }
 
-    private func makeAllRecords(for service: Service) -> [DNSResourceRecord] {
+    private func makeAllRecords(for service: Service) throws -> [DNSResourceRecord] {
         var records: [DNSResourceRecord] = []
-        records.append(makePTRRecord(for: service))
-        records.append(contentsOf: makeServiceRecords(for: service))
-        records.append(contentsOf: makeAddressRecords(for: service))
+        records.append(try makePTRRecord(for: service))
+        records.append(contentsOf: try makeServiceRecords(for: service))
+        records.append(contentsOf: try makeAddressRecords(for: service))
         return records
     }
 
-    private func makePTRRecord(for service: Service) -> DNSResourceRecord {
-        let typeName = try! DNSName(service.fullType)
-        let instanceName = try! DNSName(service.fullName)
+    private func makePTRRecord(for service: Service) throws -> DNSResourceRecord {
+        let typeName = try DNSName(service.fullType)
+        let instanceName = try DNSName(service.fullName)
 
         return DNSResourceRecord(
             name: typeName,
@@ -429,14 +450,14 @@ public actor ServiceAdvertiser {
         )
     }
 
-    private func makeServiceRecords(for service: Service) -> [DNSResourceRecord] {
+    private func makeServiceRecords(for service: Service) throws -> [DNSResourceRecord] {
         var records: [DNSResourceRecord] = []
 
-        let instanceName = try! DNSName(service.fullName)
+        let instanceName = try DNSName(service.fullName)
 
         // SRV record
         if let hostName = service.hostName, let port = service.port {
-            let target = try! DNSName(hostName)
+            let target = try DNSName(hostName)
             let srvData = SRVRecord(
                 priority: service.priority,
                 weight: service.weight,
@@ -464,11 +485,11 @@ public actor ServiceAdvertiser {
         return records
     }
 
-    private func makeAddressRecords(for service: Service) -> [DNSResourceRecord] {
+    private func makeAddressRecords(for service: Service) throws -> [DNSResourceRecord] {
         var records: [DNSResourceRecord] = []
 
         guard let hostName = service.hostName else { return records }
-        let name = try! DNSName(hostName)
+        let name = try DNSName(hostName)
 
         // A records
         for addr in service.ipv4Addresses {
