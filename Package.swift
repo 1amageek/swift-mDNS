@@ -1,24 +1,6 @@
 // swift-tools-version: 6.2
 
 import PackageDescription
-import Foundation
-
-private let packageDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-private let localSwiftNIOUDPPackage = packageDirectory
-    .appendingPathComponent("../swift-nio-udp")
-    .standardizedFileURL
-
-private func packageDependency(
-    localPath: URL,
-    remoteURL: String,
-    from version: Version
-) -> Package.Dependency {
-    let manifestPath = localPath.appendingPathComponent("Package.swift").path
-    if FileManager.default.fileExists(atPath: manifestPath) {
-        return .package(path: localPath.path)
-    }
-    return .package(url: remoteURL, from: version)
-}
 
 let package = Package(
     name: "swift-mDNS",
@@ -37,11 +19,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-log.git", from: "1.8.0"),
-        packageDependency(
-            localPath: localSwiftNIOUDPPackage,
-            remoteURL: "https://github.com/1amageek/swift-nio-udp.git",
-            from: "1.1.0"
-        ),
+        .package(url: "https://github.com/1amageek/swift-nio-udp.git", from: "1.1.0"),
     ],
     targets: [
         .target(
