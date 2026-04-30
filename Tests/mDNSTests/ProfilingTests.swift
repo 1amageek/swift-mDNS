@@ -35,7 +35,7 @@ struct ProfilingTests {
         var results: [IPv4Address?] = []
         results.reserveCapacity(iterations * samples.count)
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date.timeIntervalSinceReferenceDate
 
         for _ in 0..<iterations {
             for sample in samples {
@@ -43,7 +43,7 @@ struct ProfilingTests {
             }
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date.timeIntervalSinceReferenceDate - start
         let totalOps = iterations * samples.count
         let opsPerSecond = Double(totalOps) / elapsed
         let nsPerOp = (elapsed / Double(totalOps)) * 1_000_000_000
@@ -64,14 +64,14 @@ struct ProfilingTests {
         var results: [IPv4Address] = []
         results.reserveCapacity(iterations)
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date.timeIntervalSinceReferenceDate
 
         for i in 0..<iterations {
             let b = UInt8(i & 0xFF)
             results.append(IPv4Address(192, 168, 1, b))
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date.timeIntervalSinceReferenceDate - start
         let opsPerSecond = Double(iterations) / elapsed
         let nsPerOp = (elapsed / Double(iterations)) * 1_000_000_000
 
@@ -93,7 +93,7 @@ struct ProfilingTests {
         let iterations = 10_000_000
         var equalCount = 0
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date.timeIntervalSinceReferenceDate
 
         for i in 0..<iterations {
             if i % 2 == 0 {
@@ -103,7 +103,7 @@ struct ProfilingTests {
             }
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date.timeIntervalSinceReferenceDate - start
         let opsPerSecond = Double(iterations) / elapsed
         let nsPerOp = (elapsed / Double(iterations)) * 1_000_000_000
 
@@ -134,7 +134,7 @@ struct ProfilingTests {
         var results: [IPv6Address?] = []
         results.reserveCapacity(iterations * samples.count)
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date.timeIntervalSinceReferenceDate
 
         for _ in 0..<iterations {
             for sample in samples {
@@ -142,7 +142,7 @@ struct ProfilingTests {
             }
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date.timeIntervalSinceReferenceDate - start
         let totalOps = iterations * samples.count
         let opsPerSecond = Double(totalOps) / elapsed
         let nsPerOp = (elapsed / Double(totalOps)) * 1_000_000_000
@@ -162,14 +162,14 @@ struct ProfilingTests {
         var results: [IPv6Address] = []
         results.reserveCapacity(iterations)
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date.timeIntervalSinceReferenceDate
 
         for i in 0..<iterations {
             let lo = UInt64(i)
             results.append(IPv6Address(hi: 0xfe80_0000_0000_0000, lo: lo))
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date.timeIntervalSinceReferenceDate - start
         let opsPerSecond = Double(iterations) / elapsed
         let nsPerOp = (elapsed / Double(iterations)) * 1_000_000_000
 
@@ -193,7 +193,7 @@ struct ProfilingTests {
         var results: [DNSMessage] = []
         results.reserveCapacity(iterations)
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date.timeIntervalSinceReferenceDate
 
         for _ in 0..<iterations {
             let encoded = query.encode()
@@ -201,7 +201,7 @@ struct ProfilingTests {
             results.append(decoded)
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date.timeIntervalSinceReferenceDate - start
         let opsPerSecond = Double(iterations) / elapsed
         let nsPerOp = (elapsed / Double(iterations)) * 1_000_000_000
 
@@ -225,7 +225,7 @@ struct ProfilingTests {
         var encodeCount = 0
         var decodeCount = 0
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let start = Date.timeIntervalSinceReferenceDate
 
         for i in 0..<iterations {
             // Parse IP addresses (from network packets)
@@ -247,7 +247,7 @@ struct ProfilingTests {
             _ = IPv4Address(192, 168, 1, UInt8(i & 0xFF))
         }
 
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let elapsed = Date.timeIntervalSinceReferenceDate - start
         let totalOps = parseCount + encodeCount + decodeCount + iterations
         let opsPerSecond = Double(totalOps) / elapsed
 

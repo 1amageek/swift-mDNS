@@ -5,7 +5,6 @@
 import Foundation
 import NIOCore
 import NIOUDPTransport
-import os
 import Synchronization
 
 #if DEBUG
@@ -15,13 +14,10 @@ private let nioDNSTransportDebugLoggingEnabled =
 private let nioDNSTransportDebugLoggingEnabled = false
 #endif
 
-private let nioDNSTransportLogger = Logger(subsystem: "mDNS", category: "Transport")
-
 @inline(__always)
 private func nioDNSDebugLog(_ message: @autoclosure () -> String) {
     guard nioDNSTransportDebugLoggingEnabled else { return }
-    let text = message()
-    nioDNSTransportLogger.debug("\(text, privacy: .public)")
+    print("[mDNS] \(message())")
 }
 
 /// Protocol for mDNS transport operations.
