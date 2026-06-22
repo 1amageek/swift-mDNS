@@ -9,6 +9,7 @@ A high-performance, pure Swift implementation of Multicast DNS (mDNS) and DNS Se
 - **RFC Compliant** - Implements RFC 1035 (DNS), RFC 6762 (mDNS), RFC 6763 (DNS-SD)
 - **Modern Swift** - Uses Swift 6 concurrency with actors and Sendable types
 - **Type Safe** - Strongly typed DNS records, questions, and messages
+- **Hardened Parsing** - Wire decoding strictly bounds-checks hostile input and throws `DNSError` on malformed data instead of trapping; unknown opcode/rcode/class/record-type values are preserved (`.unknown` cases) rather than silently defaulted
 
 ## Requirements
 
@@ -21,7 +22,7 @@ Add swift-mDNS to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-mDNS.git", from: "1.0.0")
+    .package(url: "https://github.com/1amageek/swift-mDNS.git", from: "1.2.0")
 ]
 ```
 
@@ -182,7 +183,7 @@ Measured on Apple Silicon (M-series):
 - **DNS name compression**: Repeated name suffixes are compressed to 2-byte pointers (RFC 1035)
 - **ContiguousArray**: Write buffer uses `ContiguousArray<UInt8>` for better cache locality
 - **ASCII case-insensitive comparison**: DNS name equality uses byte-level comparison without string allocation
-- **Non-copyable buffers**: `ReadBuffer` and `WriteBuffer` use `~Copyable` to prevent accidental copies
+- **Non-copyable buffer**: `WriteBuffer` uses `~Copyable` to prevent accidental copies
 
 ### Running Benchmarks
 
