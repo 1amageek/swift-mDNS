@@ -2,9 +2,6 @@
 ///
 /// Implements DNS message encoding/decoding per RFC 1035 Section 4.
 
-import Foundation
-import NIOCore
-
 /// A DNS message.
 ///
 /// DNS messages consist of a header followed by four sections:
@@ -123,24 +120,10 @@ public struct DNSMessage: Sendable, Hashable {
 
     /// Encodes the message to wire format.
     @inlinable
-    public func encode() -> Data {
+    public func encode() -> [UInt8] {
         var buffer = WriteBuffer(capacity: 512)
         encode(to: &buffer)
-        return buffer.toData()
-    }
-
-    /// Encodes the message directly to a NIO ByteBuffer (zero-copy path).
-    ///
-    /// This is the most efficient encoding path when sending via NIO transport,
-    /// as it avoids intermediate Data allocation.
-    ///
-    /// - Parameter allocator: The ByteBuffer allocator to use
-    /// - Returns: A ByteBuffer containing the encoded message
-    @inlinable
-    public func encodeToByteBuffer(allocator: ByteBufferAllocator) -> ByteBuffer {
-        var writeBuffer = WriteBuffer(capacity: 512)
-        encode(to: &writeBuffer)
-        return writeBuffer.copyToByteBuffer(allocator: allocator)
+        return buffer.toArray()
     }
 
     /// Encodes the message into a write buffer with name compression.
@@ -191,39 +174,18 @@ public struct DNSMessage: Sendable, Hashable {
     // MARK: - Decoding
 
     /// Decodes a message from wire format.
-    @inlinable
-    public static func decode(from data: Data) throws -> DNSMessage {
-        try data.withUnsafeBytes { buffer in
-            try decodeFromBuffer(buffer)
-        }
-    }
-
-    /// Decodes a message from a NIO ByteBuffer (zero-copy path).
     ///
-    /// This is the most efficient decoding path when receiving via NIO transport,
-    /// as it avoids copying the buffer contents.
-    ///
-    /// - Parameter buffer: The ByteBuffer containing the DNS message
-    /// - Returns: The decoded DNS message
+    /// Reads via random-access indexing into `bytes` (names may use compression
+    /// pointers), with typed throws and full bounds checking.
     @inlinable
-    public static func decode(from buffer: ByteBuffer) throws -> DNSMessage {
-        try buffer.withUnsafeReadableBytes { ptr in
-            try decodeFromBuffer(ptr)
+    public static func decode(from bytes: [UInt8]) throws(DNSError) -> DNSMessage {
+        guard bytes.count >= 12 else {
+            throw DNSError.invalidMessage("Message too short: \(bytes.count) bytes")
         }
-    }
-
-    /// Zero-copy decoder using raw buffer pointer.
-    @inlinable
-    public static func decodeFromBuffer(_ buffer: UnsafeRawBufferPointer) throws -> DNSMessage {
-        guard buffer.count >= 12 else {
-            throw DNSError.invalidMessage("Message too short: \(buffer.count) bytes")
-        }
-
-        let base = buffer.baseAddress!
 
         // Header
-        let id = ByteOps.readUInt16(from: base, at: 0)
-        let flags = ByteOps.readUInt16(from: base, at: 2)
+        let id = ByteOps.readUInt16(from: bytes, at: 0)
+        let flags = ByteOps.readUInt16(from: bytes, at: 2)
 
         let isResponse = (flags & 0x8000) != 0
         let opcodeValue = UInt8((flags >> 11) & 0x0F)
@@ -237,10 +199,10 @@ public struct DNSMessage: Sendable, Hashable {
         // Preserve unrecognized response codes as `.unknown(...)` instead of defaulting.
         let responseCode = DNSResponseCode(rawValue: responseCodeValue)
 
-        let qdCount = Int(ByteOps.readUInt16(from: base, at: 4))
-        let anCount = Int(ByteOps.readUInt16(from: base, at: 6))
-        let nsCount = Int(ByteOps.readUInt16(from: base, at: 8))
-        let arCount = Int(ByteOps.readUInt16(from: base, at: 10))
+        let qdCount = Int(ByteOps.readUInt16(from: bytes, at: 4))
+        let anCount = Int(ByteOps.readUInt16(from: bytes, at: 6))
+        let nsCount = Int(ByteOps.readUInt16(from: bytes, at: 8))
+        let arCount = Int(ByteOps.readUInt16(from: bytes, at: 10))
 
         var offset = 12
 
@@ -248,7 +210,7 @@ public struct DNSMessage: Sendable, Hashable {
         var questions: [DNSQuestion] = []
         questions.reserveCapacity(qdCount)
         for _ in 0..<qdCount {
-            let (question, bytesConsumed) = try DNSQuestion.decodeFromBuffer(buffer, at: offset)
+            let (question, bytesConsumed) = try DNSQuestion.decode(from: bytes, at: offset)
             questions.append(question)
             offset += bytesConsumed
         }
@@ -257,7 +219,7 @@ public struct DNSMessage: Sendable, Hashable {
         var answers: [DNSResourceRecord] = []
         answers.reserveCapacity(anCount)
         for _ in 0..<anCount {
-            let (record, bytesConsumed) = try DNSResourceRecord.decodeFromBuffer(buffer, at: offset)
+            let (record, bytesConsumed) = try DNSResourceRecord.decode(from: bytes, at: offset)
             answers.append(record)
             offset += bytesConsumed
         }
@@ -266,7 +228,7 @@ public struct DNSMessage: Sendable, Hashable {
         var authority: [DNSResourceRecord] = []
         authority.reserveCapacity(nsCount)
         for _ in 0..<nsCount {
-            let (record, bytesConsumed) = try DNSResourceRecord.decodeFromBuffer(buffer, at: offset)
+            let (record, bytesConsumed) = try DNSResourceRecord.decode(from: bytes, at: offset)
             authority.append(record)
             offset += bytesConsumed
         }
@@ -275,7 +237,7 @@ public struct DNSMessage: Sendable, Hashable {
         var additional: [DNSResourceRecord] = []
         additional.reserveCapacity(arCount)
         for _ in 0..<arCount {
-            let (record, bytesConsumed) = try DNSResourceRecord.decodeFromBuffer(buffer, at: offset)
+            let (record, bytesConsumed) = try DNSResourceRecord.decode(from: bytes, at: offset)
             additional.append(record)
             offset += bytesConsumed
         }
@@ -304,7 +266,7 @@ extension DNSMessage {
     /// Creates an mDNS query for a service type.
     /// - Parameter serviceType: The service type (e.g., "_http._tcp.local.")
     /// - Returns: An mDNS query message
-    public static func mdnsQuery(for serviceType: String) throws -> DNSMessage {
+    public static func mdnsQuery(for serviceType: String) throws(DNSError) -> DNSMessage {
         let name = try DNSName(serviceType)
         let question = DNSQuestion(
             name: name,

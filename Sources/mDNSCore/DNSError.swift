@@ -2,8 +2,6 @@
 ///
 /// Error types for DNS/mDNS operations.
 
-import Foundation
-
 /// Errors that can occur during DNS operations.
 public enum DNSError: Error, Sendable, Equatable {
     /// The DNS name is invalid.

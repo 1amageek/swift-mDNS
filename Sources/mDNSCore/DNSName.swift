@@ -2,8 +2,6 @@
 ///
 /// Implements DNS name format per RFC 1035 Section 4.1.4.
 
-import Foundation
-
 /// Represents a DNS domain name.
 ///
 /// DNS names are encoded as a sequence of labels, each prefixed with
@@ -23,7 +21,7 @@ public struct DNSName: Sendable, Hashable, CustomStringConvertible {
     ///
     /// - Parameter string: A dot-separated domain name (e.g., "_http._tcp.local.")
     /// - Throws: `DNSError.invalidName` if the name is invalid
-    public init(_ string: String) throws {
+    public init(_ string: String) throws(DNSError) {
         var normalized = string
         // Remove trailing dot if present (it's the root)
         if normalized.hasSuffix(".") {
@@ -85,12 +83,12 @@ public struct DNSName: Sendable, Hashable, CustomStringConvertible {
 
     /// Encodes the name into DNS wire format.
     ///
-    /// - Returns: The encoded name as Data
+    /// - Returns: The encoded name as a byte array
     @inlinable
-    public func encode() -> Data {
+    public func encode() -> [UInt8] {
         var buffer = WriteBuffer(capacity: 256)
         encode(to: &buffer)
-        return buffer.toData()
+        return buffer.toArray()
     }
 
     /// Encodes the name into a write buffer (more efficient).
@@ -107,27 +105,18 @@ public struct DNSName: Sendable, Hashable, CustomStringConvertible {
 
     // MARK: - Decoding
 
-    /// Decodes a DNS name from data.
+    /// Decodes a DNS name from a byte buffer.
     ///
-    /// Handles both regular names and compressed names (pointers).
+    /// Handles both regular names and compressed names (pointers). Reads via
+    /// random-access indexing into `bytes` (compression pointers may jump
+    /// backward), with typed throws and full bounds checking.
     ///
     /// - Parameters:
-    ///   - data: The complete DNS message data
+    ///   - bytes: The complete DNS message bytes
     ///   - offset: The offset to start reading from
     /// - Returns: A tuple of (decoded name, bytes consumed)
     /// - Throws: `DNSError.invalidMessage` if the data is malformed
-    public static func decode(from data: Data, at offset: Int) throws -> (DNSName, Int) {
-        try data.withUnsafeBytes { buffer in
-            try decodeFromBuffer(buffer, at: offset)
-        }
-    }
-
-    /// Zero-copy decoder using raw buffer pointer.
-    @inlinable
-    public static func decodeFromBuffer(
-        _ buffer: UnsafeRawBufferPointer,
-        at offset: Int
-    ) throws -> (DNSName, Int) {
+    public static func decode(from bytes: [UInt8], at offset: Int) throws(DNSError) -> (DNSName, Int) {
         var labels: [String] = []
         labels.reserveCapacity(4)  // Most names have 3-4 labels
 
@@ -145,11 +134,10 @@ public struct DNSName: Sendable, Hashable, CustomStringConvertible {
         // name far larger than the wire region it was read from.
         var totalNameLength = 0
 
-        let base = buffer.baseAddress!
-        let count = buffer.count
+        let count = bytes.count
 
-        while currentOffset < count {
-            let length = Int(base.load(fromByteOffset: currentOffset, as: UInt8.self))
+        while currentOffset >= 0, currentOffset < count {
+            let length = Int(bytes[currentOffset])
 
             // Check for compression pointer (top 2 bits = 11)
             if (length & 0xC0) == 0xC0 {
@@ -163,7 +151,7 @@ public struct DNSName: Sendable, Hashable, CustomStringConvertible {
                 }
 
                 let hi = UInt16(length & 0x3F) << 8
-                let lo = UInt16(base.load(fromByteOffset: currentOffset + 1, as: UInt8.self))
+                let lo = UInt16(bytes[currentOffset + 1])
                 let pointer = Int(hi | lo)
 
                 if !jumped {
@@ -219,12 +207,9 @@ public struct DNSName: Sendable, Hashable, CustomStringConvertible {
                 throw DNSError.invalidMessage("Name exceeds maximum length of \(dnsMaxNameLength) bytes")
             }
 
-            // Create string directly from buffer (single allocation)
-            let labelPtr = UnsafeRawBufferPointer(
-                start: base + currentOffset + 1,
-                count: length
-            )
-            guard let label = String(bytes: labelPtr, encoding: .utf8) else {
+            // Validate the label bytes as UTF-8 (rejecting malformed input).
+            let labelStart = currentOffset + 1
+            guard let label = validatedUTF8String(bytes[labelStart..<(labelStart + length)]) else {
                 throw DNSError.invalidMessage("Invalid UTF-8 in label")
             }
 
@@ -310,6 +295,7 @@ extension DNSName: ExpressibleByStringLiteral {
         do {
             try self.init(value)
         } catch {
+            // `init(_:)` throws a typed `DNSError`, so `error` is concrete here.
             fatalError("DNSName init failed for string: '\(value)' - Error: \(error)")
         }
     }

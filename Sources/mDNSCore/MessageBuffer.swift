@@ -2,9 +2,10 @@
 ///
 /// Provides zero-copy read operations and efficient write operations
 /// for DNS message encoding/decoding.
-
-import Foundation
-import NIOCore
+///
+/// Foundation-free and NIO-free: the buffer owns its bytes as a
+/// `ContiguousArray<UInt8>` and finalizes to `[UInt8]`. The `Data`/`ByteBuffer`
+/// bridges live in the Foundation/NIO adapter (`mDNS`).
 
 // MARK: - Write Buffer
 
@@ -96,26 +97,16 @@ public struct WriteBuffer: ~Copyable {
         writeUInt8(0)
     }
 
-    /// Returns the buffer contents as Data.
+    /// Returns the buffer contents as an owned byte array.
     @inlinable
-    public consuming func toData() -> Data {
-        storage.withUnsafeBufferPointer { Data($0) }
-    }
-
-    /// Copies contents to a NIO ByteBuffer.
-    @inlinable
-    public func copyToByteBuffer(allocator: ByteBufferAllocator) -> ByteBuffer {
-        var buffer = allocator.buffer(capacity: storage.count)
-        storage.withUnsafeBufferPointer { ptr in
-            _ = buffer.writeBytes(ptr)
-        }
-        return buffer
+    public consuming func toArray() -> [UInt8] {
+        Array(storage)
     }
 
     /// Provides access to the underlying bytes.
     @inlinable
-    public func withUnsafeBytes<T>(_ body: (UnsafeRawBufferPointer) throws -> T) rethrows -> T {
-        try storage.withUnsafeBytes(body)
+    public func withUnsafeBytes<T>(_ body: (UnsafeRawBufferPointer) -> T) -> T {
+        storage.withUnsafeBytes(body)
     }
 
     /// Resets the buffer for reuse (avoids reallocation).
@@ -128,22 +119,26 @@ public struct WriteBuffer: ~Copyable {
 
 // MARK: - Inline Byte Operations
 
-/// Fast inline byte reading utilities.
+/// Fast inline big-endian byte reading utilities over `[UInt8]`.
+///
+/// Callers are responsible for bounds-checking before each read (the DNS
+/// decoders do so explicitly so they can surface a typed `DNSError` rather than
+/// trapping); these helpers index directly and trap only on a programmer error.
 @usableFromInline
 enum ByteOps {
     @inlinable
-    static func readUInt16(from ptr: UnsafeRawPointer, at offset: Int) -> UInt16 {
-        let hi = UInt16(ptr.load(fromByteOffset: offset, as: UInt8.self))
-        let lo = UInt16(ptr.load(fromByteOffset: offset + 1, as: UInt8.self))
+    static func readUInt16(from bytes: [UInt8], at offset: Int) -> UInt16 {
+        let hi = UInt16(bytes[offset])
+        let lo = UInt16(bytes[offset + 1])
         return (hi << 8) | lo
     }
 
     @inlinable
-    static func readUInt32(from ptr: UnsafeRawPointer, at offset: Int) -> UInt32 {
-        let b0 = UInt32(ptr.load(fromByteOffset: offset, as: UInt8.self))
-        let b1 = UInt32(ptr.load(fromByteOffset: offset + 1, as: UInt8.self))
-        let b2 = UInt32(ptr.load(fromByteOffset: offset + 2, as: UInt8.self))
-        let b3 = UInt32(ptr.load(fromByteOffset: offset + 3, as: UInt8.self))
+    static func readUInt32(from bytes: [UInt8], at offset: Int) -> UInt32 {
+        let b0 = UInt32(bytes[offset])
+        let b1 = UInt32(bytes[offset + 1])
+        let b2 = UInt32(bytes[offset + 2])
+        let b3 = UInt32(bytes[offset + 3])
         return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
     }
 }

@@ -2,8 +2,6 @@
 ///
 /// Implements DNS resource records per RFC 1035 and related RFCs.
 
-import Foundation
-
 // MARK: - DNS Question
 
 /// A DNS question (query).
@@ -34,10 +32,10 @@ public struct DNSQuestion: Sendable, Hashable {
 
     /// Encodes the question to wire format.
     @inlinable
-    public func encode() -> Data {
+    public func encode() -> [UInt8] {
         var buffer = WriteBuffer(capacity: 64)
         encode(to: &buffer)
-        return buffer.toData()
+        return buffer.toArray()
     }
 
     /// Encodes the question into a write buffer (more efficient).
@@ -56,32 +54,20 @@ public struct DNSQuestion: Sendable, Hashable {
         buffer.writeUInt16(classValue)
     }
 
-    /// Decodes a question from data.
+    /// Decodes a question from a byte buffer.
     @inlinable
-    public static func decode(from data: Data, at offset: Int) throws -> (DNSQuestion, Int) {
-        try data.withUnsafeBytes { buffer in
-            try decodeFromBuffer(buffer, at: offset)
-        }
-    }
-
-    /// Zero-copy decoder using raw buffer pointer.
-    @inlinable
-    public static func decodeFromBuffer(
-        _ buffer: UnsafeRawBufferPointer,
-        at offset: Int
-    ) throws -> (DNSQuestion, Int) {
-        let (name, nameBytes) = try DNSName.decodeFromBuffer(buffer, at: offset)
+    public static func decode(from bytes: [UInt8], at offset: Int) throws(DNSError) -> (DNSQuestion, Int) {
+        let (name, nameBytes) = try DNSName.decode(from: bytes, at: offset)
         var currentOffset = offset + nameBytes
 
-        guard currentOffset + 4 <= buffer.count else {
+        guard currentOffset + 4 <= bytes.count else {
             throw DNSError.invalidMessage("Truncated question")
         }
 
-        let base = buffer.baseAddress!
-        let typeValue = ByteOps.readUInt16(from: base, at: currentOffset)
+        let typeValue = ByteOps.readUInt16(from: bytes, at: currentOffset)
         currentOffset += 2
 
-        let classValue = ByteOps.readUInt16(from: base, at: currentOffset)
+        let classValue = ByteOps.readUInt16(from: bytes, at: currentOffset)
         currentOffset += 2
 
         // Preserve unrecognized question types as `.unknown(...)` instead of rejecting
@@ -144,10 +130,10 @@ public struct DNSResourceRecord: Sendable, Hashable {
 
     /// Encodes the resource record to wire format.
     @inlinable
-    public func encode() -> Data {
+    public func encode() -> [UInt8] {
         var buffer = WriteBuffer(capacity: 256)
         encode(to: &buffer)
-        return buffer.toData()
+        return buffer.toArray()
     }
 
     /// Encodes the resource record into a write buffer (more efficient).
@@ -175,42 +161,29 @@ public struct DNSResourceRecord: Sendable, Hashable {
         rdataBuffer.withUnsafeBytes { buffer.writeBytes($0) }
     }
 
-    /// Decodes a resource record from data.
+    /// Decodes a resource record from a byte buffer.
     @inlinable
-    public static func decode(from data: Data, at offset: Int) throws -> (DNSResourceRecord, Int) {
-        try data.withUnsafeBytes { buffer in
-            try decodeFromBuffer(buffer, at: offset)
-        }
-    }
-
-    /// Zero-copy decoder using raw buffer pointer.
-    @inlinable
-    public static func decodeFromBuffer(
-        _ buffer: UnsafeRawBufferPointer,
-        at offset: Int
-    ) throws -> (DNSResourceRecord, Int) {
-        let (name, nameBytes) = try DNSName.decodeFromBuffer(buffer, at: offset)
+    public static func decode(from bytes: [UInt8], at offset: Int) throws(DNSError) -> (DNSResourceRecord, Int) {
+        let (name, nameBytes) = try DNSName.decode(from: bytes, at: offset)
         var currentOffset = offset + nameBytes
 
-        guard currentOffset + 10 <= buffer.count else {
+        guard currentOffset + 10 <= bytes.count else {
             throw DNSError.invalidMessage("Truncated resource record")
         }
 
-        let base = buffer.baseAddress!
-
-        let typeValue = ByteOps.readUInt16(from: base, at: currentOffset)
+        let typeValue = ByteOps.readUInt16(from: bytes, at: currentOffset)
         currentOffset += 2
 
-        let classValue = ByteOps.readUInt16(from: base, at: currentOffset)
+        let classValue = ByteOps.readUInt16(from: bytes, at: currentOffset)
         currentOffset += 2
 
-        let ttl = ByteOps.readUInt32(from: base, at: currentOffset)
+        let ttl = ByteOps.readUInt32(from: bytes, at: currentOffset)
         currentOffset += 4
 
-        let rdataLength = Int(ByteOps.readUInt16(from: base, at: currentOffset))
+        let rdataLength = Int(ByteOps.readUInt16(from: bytes, at: currentOffset))
         currentOffset += 2
 
-        guard currentOffset + rdataLength <= buffer.count else {
+        guard currentOffset + rdataLength <= bytes.count else {
             throw DNSError.invalidMessage("Truncated RDATA")
         }
 
@@ -224,9 +197,9 @@ public struct DNSResourceRecord: Sendable, Hashable {
         // and their RDATA is decoded as raw bytes by the switch's default branch.
         // The record's stored `type` is never aliased to another known type.
         let type = DNSRecordType(rawValue: typeValue)
-        let rdata = try DNSRecordData.decodeFromBuffer(
+        let rdata = try DNSRecordData.decode(
             type: type,
-            buffer: buffer,
+            from: bytes,
             rdataOffset: currentOffset - rdataLength,
             rdataLength: rdataLength
         )
@@ -268,17 +241,17 @@ public enum DNSRecordData: Sendable, Hashable {
     case hinfo(cpu: String, os: String)
 
     /// NSEC record: next secure.
-    case nsec(nextDomain: DNSName, typeBitmap: Data)
+    case nsec(nextDomain: DNSName, typeBitmap: [UInt8])
 
     /// Unknown record type.
-    case unknown(typeValue: UInt16, data: Data)
+    case unknown(typeValue: UInt16, data: [UInt8])
 
     /// Encodes the record data to wire format.
     @inlinable
-    public func encode() -> Data {
+    public func encode() -> [UInt8] {
         var buffer = WriteBuffer(capacity: 128)
         encode(to: &buffer)
-        return buffer.toData()
+        return buffer.toArray()
     }
 
     /// Encodes the record data into a write buffer (more efficient).
@@ -318,53 +291,53 @@ public enum DNSRecordData: Sendable, Hashable {
     }
 
     /// Decodes record data from wire format.
+    ///
+    /// Reads via random-access indexing into `bytes` (PTR/SRV/NSEC RDATA may
+    /// contain compression pointers that reference earlier message bytes), with
+    /// typed throws and full bounds checking.
     @inlinable
     static func decode(
         type: DNSRecordType,
-        from data: Data,
+        from bytes: [UInt8],
         rdataOffset: Int,
         rdataLength: Int
-    ) throws -> DNSRecordData {
-        try data.withUnsafeBytes { buffer in
-            try decodeFromBuffer(type: type, buffer: buffer, rdataOffset: rdataOffset, rdataLength: rdataLength)
-        }
-    }
-
-    /// Zero-copy decoder using raw buffer pointer.
-    @inlinable
-    static func decodeFromBuffer(
-        type: DNSRecordType,
-        buffer: UnsafeRawBufferPointer,
-        rdataOffset: Int,
-        rdataLength: Int
-    ) throws -> DNSRecordData {
-        let base = buffer.baseAddress!
-
+    ) throws(DNSError) -> DNSRecordData {
         switch type {
         case .a:
             guard rdataLength == 4 else {
                 throw DNSError.invalidMessage("Invalid A record length: \(rdataLength)")
             }
-            let ptr = UnsafeRawBufferPointer(start: base + rdataOffset, count: 4)
-            return .a(IPv4Address(buffer: ptr))
+            return .a(IPv4Address(
+                bytes[rdataOffset],
+                bytes[rdataOffset + 1],
+                bytes[rdataOffset + 2],
+                bytes[rdataOffset + 3]
+            ))
 
         case .aaaa:
             guard rdataLength == 16 else {
                 throw DNSError.invalidMessage("Invalid AAAA record length: \(rdataLength)")
             }
-            let ptr = UnsafeRawBufferPointer(start: base + rdataOffset, count: 16)
-            return .aaaa(IPv6Address(buffer: ptr))
+            var hiVal: UInt64 = 0
+            var loVal: UInt64 = 0
+            for i in 0..<8 {
+                hiVal = (hiVal << 8) | UInt64(bytes[rdataOffset + i])
+            }
+            for i in 8..<16 {
+                loVal = (loVal << 8) | UInt64(bytes[rdataOffset + i])
+            }
+            return .aaaa(IPv6Address(hi: hiVal, lo: loVal))
 
         case .ptr:
-            let (name, _) = try DNSName.decodeFromBuffer(buffer, at: rdataOffset)
+            let (name, _) = try DNSName.decode(from: bytes, at: rdataOffset)
             return .ptr(name)
 
         case .srv:
-            let srv = try SRVRecord.decodeFromBuffer(buffer, at: rdataOffset)
+            let srv = try SRVRecord.decode(from: bytes, at: rdataOffset)
             return .srv(srv)
 
         case .txt:
-            let strings = try decodeTXTFromBuffer(buffer, at: rdataOffset, length: rdataLength)
+            let strings = try decodeTXTBytes(bytes, at: rdataOffset, length: rdataLength)
             return .txt(strings)
 
         case .hinfo:
@@ -373,13 +346,12 @@ public enum DNSRecordData: Sendable, Hashable {
             guard rdataOffset < rdataEnd else {
                 throw DNSError.invalidMessage("Truncated HINFO")
             }
-            let cpuLen = Int(base.load(fromByteOffset: rdataOffset, as: UInt8.self))
+            let cpuLen = Int(bytes[rdataOffset])
             guard rdataOffset + 1 + cpuLen <= rdataEnd else {
                 throw DNSError.invalidMessage("Truncated HINFO CPU")
             }
-            let cpuPtr = UnsafeRawBufferPointer(start: base + rdataOffset + 1, count: cpuLen)
             // Surface malformed UTF-8 explicitly instead of silently substituting "".
-            guard let cpu = String(bytes: cpuPtr, encoding: .utf8) else {
+            guard let cpu = validatedUTF8String(bytes[(rdataOffset + 1)..<(rdataOffset + 1 + cpuLen)]) else {
                 throw DNSError.invalidMessage("Invalid UTF-8 in HINFO CPU")
             }
 
@@ -387,13 +359,12 @@ public enum DNSRecordData: Sendable, Hashable {
             guard osOffset < rdataEnd else {
                 throw DNSError.invalidMessage("Truncated HINFO OS")
             }
-            let osLen = Int(base.load(fromByteOffset: osOffset, as: UInt8.self))
+            let osLen = Int(bytes[osOffset])
             guard osOffset + 1 + osLen <= rdataEnd else {
                 throw DNSError.invalidMessage("Truncated HINFO OS data")
             }
-            let osPtr = UnsafeRawBufferPointer(start: base + osOffset + 1, count: osLen)
             // Surface malformed UTF-8 explicitly instead of silently substituting "".
-            guard let os = String(bytes: osPtr, encoding: .utf8) else {
+            guard let os = validatedUTF8String(bytes[(osOffset + 1)..<(osOffset + 1 + osLen)]) else {
                 throw DNSError.invalidMessage("Invalid UTF-8 in HINFO OS")
             }
 
@@ -405,7 +376,7 @@ public enum DNSRecordData: Sendable, Hashable {
             // is fully contained within the RDATA window before deriving the bitmap so
             // that `bitmapLength` cannot go negative and the bitmap slice cannot read
             // past the message buffer.
-            let (nextDomain, bytesConsumed) = try DNSName.decodeFromBuffer(buffer, at: rdataOffset)
+            let (nextDomain, bytesConsumed) = try DNSName.decode(from: bytes, at: rdataOffset)
             guard bytesConsumed >= 0, bytesConsumed <= rdataLength else {
                 throw DNSError.invalidMessage(
                     "NSEC next-domain name overruns RDATA (consumed \(bytesConsumed) of \(rdataLength))"
@@ -413,15 +384,13 @@ public enum DNSRecordData: Sendable, Hashable {
             }
             let bitmapStart = rdataOffset + bytesConsumed
             let bitmapLength = rdataLength - bytesConsumed
-            guard bitmapStart >= 0, bitmapStart + bitmapLength <= buffer.count else {
+            guard bitmapStart >= 0, bitmapStart + bitmapLength <= bytes.count else {
                 throw DNSError.invalidMessage("NSEC type bitmap exceeds message bounds")
             }
-            let bitmapPtr = UnsafeRawBufferPointer(start: base + bitmapStart, count: bitmapLength)
-            return .nsec(nextDomain: nextDomain, typeBitmap: Data(bitmapPtr))
+            return .nsec(nextDomain: nextDomain, typeBitmap: Array(bytes[bitmapStart..<(bitmapStart + bitmapLength)]))
 
         default:
-            let ptr = UnsafeRawBufferPointer(start: base + rdataOffset, count: rdataLength)
-            return .unknown(typeValue: type.rawValue, data: Data(ptr))
+            return .unknown(typeValue: type.rawValue, data: Array(bytes[rdataOffset..<(rdataOffset + rdataLength)]))
         }
     }
 
@@ -442,20 +411,19 @@ public enum DNSRecordData: Sendable, Hashable {
     }
 
     @inlinable
-    static func decodeTXTFromBuffer(
-        _ buffer: UnsafeRawBufferPointer,
+    static func decodeTXTBytes(
+        _ bytes: [UInt8],
         at offset: Int,
         length: Int
-    ) throws -> [String] {
+    ) throws(DNSError) -> [String] {
         var strings: [String] = []
         strings.reserveCapacity(4)
 
         var currentOffset = offset
         let endOffset = offset + length
-        let base = buffer.baseAddress!
 
         while currentOffset < endOffset {
-            let stringLength = Int(base.load(fromByteOffset: currentOffset, as: UInt8.self))
+            let stringLength = Int(bytes[currentOffset])
             currentOffset += 1
 
             if stringLength == 0 {
@@ -467,9 +435,8 @@ public enum DNSRecordData: Sendable, Hashable {
                 throw DNSError.invalidMessage("Truncated TXT string")
             }
 
-            let ptr = UnsafeRawBufferPointer(start: base + currentOffset, count: stringLength)
             // Surface malformed UTF-8 explicitly instead of silently substituting "".
-            guard let string = String(bytes: ptr, encoding: .utf8) else {
+            guard let string = validatedUTF8String(bytes[currentOffset..<(currentOffset + stringLength)]) else {
                 throw DNSError.invalidMessage("Invalid UTF-8 in TXT string")
             }
             strings.append(string)
@@ -505,10 +472,10 @@ public struct SRVRecord: Sendable, Hashable {
 
     /// Encodes to wire format.
     @inlinable
-    public func encode() -> Data {
+    public func encode() -> [UInt8] {
         var buffer = WriteBuffer(capacity: 64)
         encode(to: &buffer)
-        return buffer.toData()
+        return buffer.toArray()
     }
 
     /// Encodes to a write buffer (more efficient).
@@ -520,30 +487,18 @@ public struct SRVRecord: Sendable, Hashable {
         target.encode(to: &buffer)
     }
 
-    /// Decodes from wire format.
+    /// Decodes from a byte buffer.
     @inlinable
-    public static func decode(from data: Data, at offset: Int) throws -> SRVRecord {
-        try data.withUnsafeBytes { buffer in
-            try decodeFromBuffer(buffer, at: offset)
-        }
-    }
-
-    /// Zero-copy decoder using raw buffer pointer.
-    @inlinable
-    public static func decodeFromBuffer(
-        _ buffer: UnsafeRawBufferPointer,
-        at offset: Int
-    ) throws -> SRVRecord {
-        guard offset + 6 <= buffer.count else {
+    public static func decode(from bytes: [UInt8], at offset: Int) throws(DNSError) -> SRVRecord {
+        guard offset + 6 <= bytes.count else {
             throw DNSError.invalidMessage("Truncated SRV record")
         }
 
-        let base = buffer.baseAddress!
-        let priority = ByteOps.readUInt16(from: base, at: offset)
-        let weight = ByteOps.readUInt16(from: base, at: offset + 2)
-        let port = ByteOps.readUInt16(from: base, at: offset + 4)
+        let priority = ByteOps.readUInt16(from: bytes, at: offset)
+        let weight = ByteOps.readUInt16(from: bytes, at: offset + 2)
+        let port = ByteOps.readUInt16(from: bytes, at: offset + 4)
 
-        let (target, _) = try DNSName.decodeFromBuffer(buffer, at: offset + 6)
+        let (target, _) = try DNSName.decode(from: bytes, at: offset + 6)
 
         return SRVRecord(priority: priority, weight: weight, port: port, target: target)
     }
@@ -565,15 +520,6 @@ public struct IPv4Address: Sendable, CustomStringConvertible {
     @inlinable
     public init(_ a: UInt8, _ b: UInt8, _ c: UInt8, _ d: UInt8) {
         self.bytes = (a, b, c, d)
-    }
-
-    @inlinable
-    public init(_ data: Data) {
-        precondition(data.count == 4, "IPv4 address must be 4 bytes")
-        self.bytes = (data[data.startIndex],
-                      data[data.startIndex + 1],
-                      data[data.startIndex + 2],
-                      data[data.startIndex + 3])
     }
 
     @inlinable
@@ -629,10 +575,10 @@ public struct IPv4Address: Sendable, CustomStringConvertible {
         self.bytes = bytes
     }
 
-    /// Returns raw bytes as Data (for compatibility).
+    /// Returns the address as an owned 4-byte array.
     @inlinable
-    public var rawData: Data {
-        Data([bytes.0, bytes.1, bytes.2, bytes.3])
+    public var rawBytes: [UInt8] {
+        [bytes.0, bytes.1, bytes.2, bytes.3]
     }
 
     /// Writes to a buffer without allocation.
@@ -677,21 +623,6 @@ public struct IPv6Address: Sendable, CustomStringConvertible {
     public init(hi: UInt64, lo: UInt64) {
         self.hi = hi
         self.lo = lo
-    }
-
-    @inlinable
-    public init(_ data: Data) {
-        precondition(data.count == 16, "IPv6 address must be 16 bytes")
-        var hiVal: UInt64 = 0
-        var loVal: UInt64 = 0
-        for i in 0..<8 {
-            hiVal = (hiVal << 8) | UInt64(data[data.startIndex + i])
-        }
-        for i in 8..<16 {
-            loVal = (loVal << 8) | UInt64(data[data.startIndex + i])
-        }
-        self.hi = hiVal
-        self.lo = loVal
     }
 
     @inlinable
@@ -866,17 +797,18 @@ public struct IPv6Address: Sendable, CustomStringConvertible {
     }
 
 
-    /// Returns raw bytes as Data (for compatibility).
+    /// Returns the address as an owned 16-byte array (network order).
     @inlinable
-    public var rawData: Data {
-        var data = Data(count: 16)
-        data.withUnsafeMutableBytes { ptr in
-            var h = hi.bigEndian
-            var l = lo.bigEndian
-            withUnsafeBytes(of: &h) { ptr.copyMemory(from: $0) }
-            withUnsafeBytes(of: &l) { (ptr.baseAddress! + 8).copyMemory(from: $0.baseAddress!, byteCount: 8) }
+    public var rawBytes: [UInt8] {
+        var result = [UInt8]()
+        result.reserveCapacity(16)
+        for shift in stride(from: 56, through: 0, by: -8) {
+            result.append(UInt8((hi >> UInt64(shift)) & 0xFF))
         }
-        return data
+        for shift in stride(from: 56, through: 0, by: -8) {
+            result.append(UInt8((lo >> UInt64(shift)) & 0xFF))
+        }
+        return result
     }
 
     /// Writes to a buffer without allocation.

@@ -2,8 +2,6 @@
 ///
 /// Constants for DNS and mDNS protocols per RFC 1035, RFC 6762.
 
-import Foundation
-
 // MARK: - mDNS Addresses
 
 /// mDNS multicast IPv4 address: 224.0.0.251
