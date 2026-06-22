@@ -29,4 +29,7 @@ public enum DNSError: Error, Sendable, Equatable {
 
     /// Service not found.
     case serviceNotFound(String)
+
+    /// The transport required for the requested address family is unavailable.
+    case transportUnavailable(String)
 }

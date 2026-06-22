@@ -117,6 +117,20 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
 
     private let state: Mutex<State>
 
+    /// Count of inbound datagrams that failed to decode and were dropped.
+    ///
+    /// Per RFC 6762, a malformed multicast datagram is dropped silently at the
+    /// protocol level. This counter provides observability so that persistent
+    /// malformed traffic (a misbehaving peer, an attack) can be detected even
+    /// when debug logging is disabled. A throttled, non-debug log is emitted as
+    /// the counter crosses power-of-ten thresholds.
+    private let decodeFailureCount: Mutex<UInt64>
+
+    /// The total number of inbound datagrams dropped due to decode failures.
+    public var droppedDecodeFailureCount: UInt64 {
+        decodeFailureCount.withLock { $0 }
+    }
+
     /// Creates a new mDNS transport.
     ///
     /// - Parameter configuration: Transport configuration
@@ -153,6 +167,7 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
         }
 
         self.state = Mutex(State())
+        self.decodeFailureCount = Mutex(0)
 
         // Create messages stream
         var continuation: AsyncStream<ReceivedDNSMessage>.Continuation!
@@ -288,26 +303,39 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
         switch address {
         case .v4:
             guard let ipv4Transport = ipv4Transport else {
-                throw NSError(domain: "mDNS", code: -1, userInfo: [
-                    NSLocalizedDescriptionKey: "IPv4 transport not available"
-                ])
+                throw DNSError.transportUnavailable("IPv4 transport not available")
             }
             try await ipv4Transport.send(buffer, to: address)
         case .v6:
             guard let ipv6Transport = ipv6Transport else {
-                throw NSError(domain: "mDNS", code: -1, userInfo: [
-                    NSLocalizedDescriptionKey: "IPv6 transport not available"
-                ])
+                throw DNSError.transportUnavailable("IPv6 transport not available")
             }
             try await ipv6Transport.send(buffer, to: address)
         case .unixDomainSocket:
-            throw NSError(domain: "mDNS", code: -1, userInfo: [
-                NSLocalizedDescriptionKey: "Unix domain sockets not supported for mDNS"
-            ])
+            throw DNSError.transportUnavailable("Unix domain sockets not supported for mDNS")
         }
     }
 
     // MARK: - Private
+
+    /// Records a dropped decode failure and emits a throttled, non-debug log.
+    ///
+    /// The log fires only when the running total crosses a power-of-ten threshold
+    /// (1, 10, 100, ...), so a flood of malformed datagrams cannot itself become a
+    /// log-spam denial of service while persistent problems remain visible.
+    private func recordDecodeFailure(isIPv4: Bool, error: Error) {
+        let total = decodeFailureCount.withLock { count -> UInt64 in
+            count += 1
+            return count
+        }
+
+        nioDNSDebugLog("mDNS decode error (\(isIPv4 ? "IPv4" : "IPv6")): \(error)")
+
+        if total.isPowerOfTen {
+            let family = isIPv4 ? "IPv4" : "IPv6"
+            print("[mDNS] Dropped \(total) malformed datagram(s); most recent on \(family): \(error)")
+        }
+    }
 
     private func startReceiving(from transport: NIOUDPTransport, isIPv4: Bool) {
         let task = Task { [weak self] in
@@ -323,8 +351,10 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
                     )
                     self.messagesContinuation.yield(received)
                 } catch {
-                    // Ignore malformed messages
-                    nioDNSDebugLog("mDNS decode error (\(isIPv4 ? "IPv4" : "IPv6")): \(error)")
+                    // Per RFC 6762, drop this malformed multicast datagram (do not
+                    // tear down the receive loop). Record it for observability so
+                    // persistent malformed traffic is detectable without debug logs.
+                    self.recordDecodeFailure(isIPv4: isIPv4, error: error)
                 }
             }
         }
@@ -336,5 +366,17 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
                 state.ipv6ReceiveTask = task
             }
         }
+    }
+}
+
+private extension UInt64 {
+    /// Whether the value is a positive power of ten (1, 10, 100, ...).
+    var isPowerOfTen: Bool {
+        guard self > 0 else { return false }
+        var value = self
+        while value % 10 == 0 {
+            value /= 10
+        }
+        return value == 1
     }
 }

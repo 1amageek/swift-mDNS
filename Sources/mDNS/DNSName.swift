@@ -135,7 +135,15 @@ public struct DNSName: Sendable, Hashable, CustomStringConvertible {
         var bytesConsumed = 0
         var jumped = false
         var jumpCount = 0
+        var terminated = false
         let maxJumps = 128  // Prevent infinite loops
+
+        // Track the encoded length of the assembled name (sum of each label's
+        // length octet + its bytes, plus the terminating zero) so the RFC 1035
+        // 255-byte total-name limit is enforced at decode time, not only in
+        // `init(String)`. Compression and many short labels can otherwise build a
+        // name far larger than the wire region it was read from.
+        var totalNameLength = 0
 
         let base = buffer.baseAddress!
         let count = buffer.count
@@ -186,6 +194,12 @@ public struct DNSName: Sendable, Hashable, CustomStringConvertible {
                 if !jumped {
                     bytesConsumed = currentOffset - offset + 1
                 }
+                // Account for the terminating zero octet.
+                totalNameLength += 1
+                guard totalNameLength <= dnsMaxNameLength else {
+                    throw DNSError.invalidMessage("Name exceeds maximum length of \(dnsMaxNameLength) bytes")
+                }
+                terminated = true
                 break
             }
 
@@ -195,6 +209,14 @@ public struct DNSName: Sendable, Hashable, CustomStringConvertible {
 
             guard currentOffset + 1 + length <= count else {
                 throw DNSError.invalidMessage("Truncated label")
+            }
+
+            // Enforce the RFC 1035 total-name limit incrementally. Each label
+            // contributes its length octet plus its bytes; exceeding the cap is a
+            // malformed/hostile name and must be rejected, never truncated.
+            totalNameLength += 1 + length
+            guard totalNameLength <= dnsMaxNameLength else {
+                throw DNSError.invalidMessage("Name exceeds maximum length of \(dnsMaxNameLength) bytes")
             }
 
             // Create string directly from buffer (single allocation)
@@ -208,6 +230,13 @@ public struct DNSName: Sendable, Hashable, CustomStringConvertible {
 
             labels.append(label)
             currentOffset += 1 + length
+        }
+
+        // A well-formed name ends with the zero-length root label. Reaching the end
+        // of the buffer without that terminator means the name was truncated; report
+        // it explicitly rather than returning a partial name with zero bytes consumed.
+        guard terminated else {
+            throw DNSError.invalidMessage("Name not terminated before end of message")
         }
 
         return (DNSName(labels: labels), bytesConsumed)

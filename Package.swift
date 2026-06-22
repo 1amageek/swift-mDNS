@@ -19,7 +19,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-log.git", from: "1.8.0"),
-        .package(url: "https://github.com/1amageek/swift-nio-udp.git", from: "1.1.1"),
+        .package(url: "https://github.com/1amageek/swift-nio-udp.git", from: "1.1.2"),
     ],
     targets: [
         .target(

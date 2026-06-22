@@ -84,12 +84,13 @@ public struct DNSQuestion: Sendable, Hashable {
         let classValue = ByteOps.readUInt16(from: base, at: currentOffset)
         currentOffset += 2
 
-        guard let type = DNSRecordType(rawValue: typeValue) else {
-            throw DNSError.unsupportedRecordType(typeValue)
-        }
+        // Preserve unrecognized question types as `.unknown(...)` instead of rejecting
+        // the whole message: a peer may legitimately query for a type we do not model.
+        let type = DNSRecordType(rawValue: typeValue)
 
         let unicastResponse = (classValue & 0x8000) != 0
-        let recordClass = DNSRecordClass(rawValue: classValue & 0x7FFF) ?? .in
+        // Preserve unrecognized classes as `.unknown(...)` instead of defaulting.
+        let recordClass = DNSRecordClass(rawValue: classValue & 0x7FFF)
 
         return (
             DNSQuestion(
@@ -216,30 +217,24 @@ public struct DNSResourceRecord: Sendable, Hashable {
         currentOffset += rdataLength
 
         let cacheFlush = (classValue & dnsCacheFlushBit) != 0
-        let recordClass = DNSRecordClass(rawValue: classValue & 0x7FFF) ?? .in
+        // Preserve unrecognized classes as `.unknown(...)` instead of defaulting.
+        let recordClass = DNSRecordClass(rawValue: classValue & 0x7FFF)
 
+        // Preserve the exact wire type. Unrecognized types become `.unknown(...)`,
+        // and their RDATA is decoded as raw bytes by the switch's default branch.
+        // The record's stored `type` is never aliased to another known type.
         let type = DNSRecordType(rawValue: typeValue)
-        let rdata: DNSRecordData
-
-        if let knownType = type {
-            rdata = try DNSRecordData.decodeFromBuffer(
-                type: knownType,
-                buffer: buffer,
-                rdataOffset: currentOffset - rdataLength,
-                rdataLength: rdataLength
-            )
-        } else {
-            let rdataPtr = UnsafeRawBufferPointer(
-                start: base + currentOffset - rdataLength,
-                count: rdataLength
-            )
-            rdata = .unknown(typeValue: typeValue, data: Data(rdataPtr))
-        }
+        let rdata = try DNSRecordData.decodeFromBuffer(
+            type: type,
+            buffer: buffer,
+            rdataOffset: currentOffset - rdataLength,
+            rdataLength: rdataLength
+        )
 
         return (
             DNSResourceRecord(
                 name: name,
-                type: type ?? .a,
+                type: type,
                 recordClass: recordClass,
                 cacheFlush: cacheFlush,
                 ttl: ttl,
@@ -373,33 +368,54 @@ public enum DNSRecordData: Sendable, Hashable {
             return .txt(strings)
 
         case .hinfo:
-            guard rdataOffset < buffer.count else {
+            // Confine all reads to the RDATA window [rdataOffset, rdataEnd).
+            let rdataEnd = rdataOffset + rdataLength
+            guard rdataOffset < rdataEnd else {
                 throw DNSError.invalidMessage("Truncated HINFO")
             }
             let cpuLen = Int(base.load(fromByteOffset: rdataOffset, as: UInt8.self))
-            guard rdataOffset + 1 + cpuLen < buffer.count else {
+            guard rdataOffset + 1 + cpuLen <= rdataEnd else {
                 throw DNSError.invalidMessage("Truncated HINFO CPU")
             }
             let cpuPtr = UnsafeRawBufferPointer(start: base + rdataOffset + 1, count: cpuLen)
-            let cpu = String(bytes: cpuPtr, encoding: .utf8) ?? ""
+            // Surface malformed UTF-8 explicitly instead of silently substituting "".
+            guard let cpu = String(bytes: cpuPtr, encoding: .utf8) else {
+                throw DNSError.invalidMessage("Invalid UTF-8 in HINFO CPU")
+            }
 
             let osOffset = rdataOffset + 1 + cpuLen
-            guard osOffset < buffer.count else {
+            guard osOffset < rdataEnd else {
                 throw DNSError.invalidMessage("Truncated HINFO OS")
             }
             let osLen = Int(base.load(fromByteOffset: osOffset, as: UInt8.self))
-            guard osOffset + 1 + osLen <= rdataOffset + rdataLength else {
+            guard osOffset + 1 + osLen <= rdataEnd else {
                 throw DNSError.invalidMessage("Truncated HINFO OS data")
             }
             let osPtr = UnsafeRawBufferPointer(start: base + osOffset + 1, count: osLen)
-            let os = String(bytes: osPtr, encoding: .utf8) ?? ""
+            // Surface malformed UTF-8 explicitly instead of silently substituting "".
+            guard let os = String(bytes: osPtr, encoding: .utf8) else {
+                throw DNSError.invalidMessage("Invalid UTF-8 in HINFO OS")
+            }
 
             return .hinfo(cpu: cpu, os: os)
 
         case .nsec:
+            // The "next domain" name may follow compression pointers, so its decoded
+            // byte count is not bounded by rdataLength a priori. Validate that the name
+            // is fully contained within the RDATA window before deriving the bitmap so
+            // that `bitmapLength` cannot go negative and the bitmap slice cannot read
+            // past the message buffer.
             let (nextDomain, bytesConsumed) = try DNSName.decodeFromBuffer(buffer, at: rdataOffset)
+            guard bytesConsumed >= 0, bytesConsumed <= rdataLength else {
+                throw DNSError.invalidMessage(
+                    "NSEC next-domain name overruns RDATA (consumed \(bytesConsumed) of \(rdataLength))"
+                )
+            }
             let bitmapStart = rdataOffset + bytesConsumed
             let bitmapLength = rdataLength - bytesConsumed
+            guard bitmapStart >= 0, bitmapStart + bitmapLength <= buffer.count else {
+                throw DNSError.invalidMessage("NSEC type bitmap exceeds message bounds")
+            }
             let bitmapPtr = UnsafeRawBufferPointer(start: base + bitmapStart, count: bitmapLength)
             return .nsec(nextDomain: nextDomain, typeBitmap: Data(bitmapPtr))
 
@@ -452,7 +468,10 @@ public enum DNSRecordData: Sendable, Hashable {
             }
 
             let ptr = UnsafeRawBufferPointer(start: base + currentOffset, count: stringLength)
-            let string = String(bytes: ptr, encoding: .utf8) ?? ""
+            // Surface malformed UTF-8 explicitly instead of silently substituting "".
+            guard let string = String(bytes: ptr, encoding: .utf8) else {
+                throw DNSError.invalidMessage("Invalid UTF-8 in TXT string")
+            }
             strings.append(string)
             currentOffset += stringLength
         }

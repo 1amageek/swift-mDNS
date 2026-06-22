@@ -227,13 +227,15 @@ public struct DNSMessage: Sendable, Hashable {
 
         let isResponse = (flags & 0x8000) != 0
         let opcodeValue = UInt8((flags >> 11) & 0x0F)
-        let opcode = DNSOpcode(rawValue: opcodeValue) ?? .query
+        // Preserve unrecognized opcodes as `.unknown(...)` instead of defaulting.
+        let opcode = DNSOpcode(rawValue: opcodeValue)
         let isAuthoritative = (flags & 0x0400) != 0
         let isTruncated = (flags & 0x0200) != 0
         let recursionDesired = (flags & 0x0100) != 0
         let recursionAvailable = (flags & 0x0080) != 0
         let responseCodeValue = UInt8(flags & 0x000F)
-        let responseCode = DNSResponseCode(rawValue: responseCodeValue) ?? .noError
+        // Preserve unrecognized response codes as `.unknown(...)` instead of defaulting.
+        let responseCode = DNSResponseCode(rawValue: responseCodeValue)
 
         let qdCount = Int(ByteOps.readUInt16(from: base, at: 4))
         let anCount = Int(ByteOps.readUInt16(from: base, at: 6))
