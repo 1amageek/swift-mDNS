@@ -273,3 +273,19 @@ public let dnsMaxNameLength = 255
 
 /// Maximum DNS label length.
 public let dnsMaxLabelLength = 63
+
+/// Smallest possible encoded question, in bytes.
+///
+/// A question is a name followed by a 2-byte TYPE and a 2-byte CLASS. The
+/// smallest legal name is the single root label (one zero byte), giving
+/// 1 + 2 + 2 = 5 bytes. Used to bound speculative reservation against the
+/// attacker-controlled QDCOUNT during decode.
+public let minQuestionSize = 5
+
+/// Smallest possible encoded resource record, in bytes.
+///
+/// A resource record is a question's fields plus a 4-byte TTL and a 2-byte
+/// RDLENGTH; the smallest legal record has a root-label name and zero-length
+/// RDATA, giving 1 + 2 + 2 + 4 + 2 = 11 bytes. Used to bound speculative
+/// reservation against the attacker-controlled AN/NS/AR counts during decode.
+public let minResourceRecordSize = 11

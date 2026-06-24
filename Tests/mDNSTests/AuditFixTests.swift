@@ -401,4 +401,80 @@ struct AuditFixTests {
             // Expected: malformed input must surface as a thrown error.
         }
     }
+
+    // MARK: - Unbounded-Allocation / Amplification (Finding: capped reservation)
+
+    /// Builds a 12-byte DNS header with all four section counts set to `count`,
+    /// optionally padded with `trailing` arbitrary bytes after the header.
+    private func makeHeaderOnly(count: UInt16, trailing: Int = 0) -> [UInt8] {
+        var data = [UInt8]()
+        data.append(contentsOf: [0x00, 0x00, 0x84, 0x00])  // ID + flags
+        let hi = UInt8(count >> 8)
+        let lo = UInt8(count & 0xFF)
+        data.append(contentsOf: [hi, lo])  // QDCOUNT
+        data.append(contentsOf: [hi, lo])  // ANCOUNT
+        data.append(contentsOf: [hi, lo])  // NSCOUNT
+        data.append(contentsOf: [hi, lo])  // ARCOUNT
+        for _ in 0..<trailing {
+            data.append(0x00)
+        }
+        return data
+    }
+
+    @Test("12-byte header with all section counts = 0xFFFF throws and never reserves 262K slots")
+    func maxSectionCountsThrowsWithoutMassReservation() {
+        // A 12-byte datagram declaring 0xFFFF questions/answers/authority/additional.
+        // The pre-fix decoder called reserveCapacity(0xFFFF) four times (~262K slots of
+        // DNSQuestion/DNSResourceRecord) before validating a single record. With the
+        // reservation capped to remainingBytes/minEntrySize (here 0, since no bytes
+        // follow the header), no mass reservation occurs and the decode loop throws on
+        // the first truncated record. Reaching the assertion at all proves the call
+        // returned promptly instead of hanging or OOM-ing on a 262K allocation.
+        let hostile = makeHeaderOnly(count: 0xFFFF)
+        #expect(hostile.count == 12)
+        #expect(throws: DNSError.self) {
+            _ = try DNSMessage.decode(from: hostile)
+        }
+    }
+
+    @Test("Oversized message above the mDNS ceiling throws messageTooLarge")
+    func oversizedMessageThrowsMessageTooLarge() {
+        // One byte over the mDNS multicast ceiling must be rejected up front, before any
+        // section count is read. This is the size-ceiling guard that bounds the worst
+        // case independently of the section counts.
+        let oversized = makeHeaderOnly(count: 0x0000, trailing: mdnsMaxMessageSize + 1 - 12)
+        #expect(oversized.count == mdnsMaxMessageSize + 1)
+        #expect(throws: DNSError.messageTooLarge(byteCount: mdnsMaxMessageSize + 1)) {
+            _ = try DNSMessage.decode(from: oversized)
+        }
+    }
+
+    @Test("Message at exactly the mDNS ceiling is accepted")
+    func messageAtCeilingIsAccepted() throws {
+        // A well-formed-enough buffer of exactly mdnsMaxMessageSize bytes (zero declared
+        // sections, padded body) must decode without throwing the size-ceiling error.
+        // Zero section counts mean the padding is never interpreted as records.
+        let atCeiling = makeHeaderOnly(count: 0x0000, trailing: mdnsMaxMessageSize - 12)
+        #expect(atCeiling.count == mdnsMaxMessageSize)
+        let decoded = try DNSMessage.decode(from: atCeiling)
+        #expect(decoded.questions.isEmpty)
+        #expect(decoded.answers.isEmpty)
+        #expect(decoded.authority.isEmpty)
+        #expect(decoded.additional.isEmpty)
+    }
+
+    @Test("Normal well-formed message still decodes after the reservation cap")
+    func wellFormedMessageStillDecodes() throws {
+        // The capped reservation must not regress the happy path: a normal single-answer
+        // A-record response decodes intact.
+        let good = makeSingleAnswerMessage(type: 1, rdata: [192, 168, 1, 1])
+        let decoded = try DNSMessage.decode(from: good)
+        #expect(decoded.answers.count == 1)
+        #expect(decoded.answers[0].type == .a)
+        guard case .a(let address) = decoded.answers[0].rdata else {
+            Issue.record("Expected A rdata")
+            return
+        }
+        #expect(address == IPv4Address(192, 168, 1, 1))
+    }
 }

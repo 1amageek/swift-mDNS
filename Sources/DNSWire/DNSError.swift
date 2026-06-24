@@ -10,6 +10,13 @@ public enum DNSError: Error, Sendable, Equatable {
     /// The DNS message is malformed.
     case invalidMessage(String)
 
+    /// The DNS message exceeds the maximum permitted size.
+    ///
+    /// Carries the offending byte count so callers can log/diagnose without
+    /// re-measuring. Decode rejects oversized buffers up front to bound
+    /// speculative allocation from attacker-controlled section counts.
+    case messageTooLarge(byteCount: Int)
+
     /// The DNS record type is not supported.
     case unsupportedRecordType(UInt16)
 

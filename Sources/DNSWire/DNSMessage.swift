@@ -183,6 +183,15 @@ public struct DNSMessage: Sendable, Hashable {
             throw DNSError.invalidMessage("Message too short: \(bytes.count) bytes")
         }
 
+        // Enforce a hard message-size ceiling before reading any attacker-controlled
+        // section counts. Without this, a 12-byte datagram with all four counts set to
+        // 0xFFFF would drive ~262K speculative element reservations below. mDNS rides on
+        // multicast and so permits payloads up to `mdnsMaxMessageSize`; reject anything
+        // larger outright rather than silently truncating.
+        guard bytes.count <= mdnsMaxMessageSize else {
+            throw DNSError.messageTooLarge(byteCount: bytes.count)
+        }
+
         // Header
         let id = ByteOps.readUInt16(from: bytes, at: 0)
         let flags = ByteOps.readUInt16(from: bytes, at: 2)
@@ -206,9 +215,24 @@ public struct DNSMessage: Sendable, Hashable {
 
         var offset = 12
 
+        // Cap every speculative reservation to what the remaining bytes could actually
+        // hold, mirroring SWIM's `min(count, remainingBytes / minEntrySize)`. The wire
+        // counts are attacker-controlled (each up to 0xFFFF), so reserving `count` slots
+        // directly is an unbounded-allocation amplification vector. The smallest possible
+        // question is 5 bytes (1-byte root name + 2-byte type + 2-byte class); the
+        // smallest possible resource record is 11 bytes (question fields + 4-byte TTL +
+        // 2-byte RDLENGTH with zero-length RDATA). The decode loops below still validate
+        // and throw on any truncation, so this only bounds the up-front allocation.
+        @inline(__always)
+        func cappedReservation(_ count: Int, minEntrySize: Int, from currentOffset: Int) -> Int {
+            let remainingBytes = bytes.count - currentOffset
+            guard remainingBytes > 0 else { return 0 }
+            return min(count, remainingBytes / minEntrySize)
+        }
+
         // Questions
         var questions: [DNSQuestion] = []
-        questions.reserveCapacity(qdCount)
+        questions.reserveCapacity(cappedReservation(qdCount, minEntrySize: minQuestionSize, from: offset))
         for _ in 0..<qdCount {
             let (question, bytesConsumed) = try DNSQuestion.decode(from: bytes, at: offset)
             questions.append(question)
@@ -217,7 +241,7 @@ public struct DNSMessage: Sendable, Hashable {
 
         // Answers
         var answers: [DNSResourceRecord] = []
-        answers.reserveCapacity(anCount)
+        answers.reserveCapacity(cappedReservation(anCount, minEntrySize: minResourceRecordSize, from: offset))
         for _ in 0..<anCount {
             let (record, bytesConsumed) = try DNSResourceRecord.decode(from: bytes, at: offset)
             answers.append(record)
@@ -226,7 +250,7 @@ public struct DNSMessage: Sendable, Hashable {
 
         // Authority
         var authority: [DNSResourceRecord] = []
-        authority.reserveCapacity(nsCount)
+        authority.reserveCapacity(cappedReservation(nsCount, minEntrySize: minResourceRecordSize, from: offset))
         for _ in 0..<nsCount {
             let (record, bytesConsumed) = try DNSResourceRecord.decode(from: bytes, at: offset)
             authority.append(record)
@@ -235,7 +259,7 @@ public struct DNSMessage: Sendable, Hashable {
 
         // Additional
         var additional: [DNSResourceRecord] = []
-        additional.reserveCapacity(arCount)
+        additional.reserveCapacity(cappedReservation(arCount, minEntrySize: minResourceRecordSize, from: offset))
         for _ in 0..<arCount {
             let (record, bytesConsumed) = try DNSResourceRecord.decode(from: bytes, at: offset)
             additional.append(record)
