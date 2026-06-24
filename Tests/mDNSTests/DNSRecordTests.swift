@@ -1,6 +1,5 @@
 import Testing
-import Foundation
-@testable import mDNS
+import DNSWire
 
 @Suite("DNS Record Tests")
 struct DNSRecordTests {
@@ -32,7 +31,7 @@ struct DNSRecordTests {
     func ipv6FromString() {
         let addr = IPv6Address(string: "::1")
         #expect(addr != nil)
-        #expect(addr?.rawData.count == 16)
+        #expect(addr?.rawBytes.count == 16)
     }
 
     @Test("IPv6Address full format")

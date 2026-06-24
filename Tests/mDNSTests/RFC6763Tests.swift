@@ -4,8 +4,8 @@
 /// https://tools.ietf.org/html/rfc6763
 
 import Testing
-import Foundation
-@testable import mDNS
+import MDNS
+import DNSWire
 
 @Suite("RFC 6763 - DNS-Based Service Discovery")
 struct RFC6763Tests {
@@ -14,7 +14,7 @@ struct RFC6763Tests {
 
     @Test("Service instance name format: Instance._Service._Protocol.Domain")
     func serviceInstanceNameFormat() throws {
-        let service = Service(
+        let service = MDNSService(
             name: "My Web Server",
             type: "_http._tcp",
             domain: "local",
@@ -27,7 +27,7 @@ struct RFC6763Tests {
 
     @Test("Service type format: _Service._Protocol")
     func serviceTypeFormat() throws {
-        let service = Service(
+        let service = MDNSService(
             name: "Test",
             type: "_http._tcp"
         )
@@ -38,7 +38,7 @@ struct RFC6763Tests {
 
     @Test("Service with custom domain")
     func serviceWithCustomDomain() throws {
-        let service = Service(
+        let service = MDNSService(
             name: "My Service",
             type: "_http._tcp",
             domain: "example.com"
@@ -74,12 +74,12 @@ struct RFC6763Tests {
     @Test("Service browsing meta-query constant")
     func serviceBrowsingMetaQuery() {
         // _services._dns-sd._udp.local. enumerates all service types
-        #expect(mDNS.dnsSDServicesMetaQuery == "_services._dns-sd._udp.local.")
+        #expect(DNSWire.dnsSDServicesMetaQuery == "_services._dns-sd._udp.local.")
     }
 
     @Test("Parse meta-query response")
     func parseMetaQueryResponse() throws {
-        let metaQueryName = try DNSName(mDNS.dnsSDServicesMetaQuery)
+        let metaQueryName = try DNSName(DNSWire.dnsSDServicesMetaQuery)
         let serviceType = try DNSName("_http._tcp.local.")
 
         let ptrRecord = DNSResourceRecord(
@@ -244,7 +244,7 @@ struct RFC6763Tests {
     @Test("Service type prefix underscore")
     func serviceTypePrefixUnderscore() throws {
         // Service types must start with underscore
-        let service = Service(name: "Test", type: "_http._tcp")
+        let service = MDNSService(name: "Test", type: "_http._tcp")
         #expect(service.type.hasPrefix("_"))
     }
 
@@ -268,27 +268,27 @@ struct RFC6763Tests {
 
     @Test("Service resolution status tracking")
     func serviceResolutionStatus() throws {
-        var service = Service(name: "Test", type: "_http._tcp")
+        var service = MDNSService(name: "Test", type: "_http._tcp")
 
         #expect(!service.isResolved)
         #expect(!service.hasAddresses)
 
-        service.hostName = "test.local"
+        service.host = "test.local"
         service.port = 8080
 
         #expect(service.isResolved)
         #expect(!service.hasAddresses)
 
-        service.ipv4Addresses.append(IPv4Address(192, 168, 1, 1))
+        service.addresses.append(.v4(192, 168, 1, 1))
 
         #expect(service.hasAddresses)
     }
 
     @Test("Service equality by full name")
     func serviceEquality() throws {
-        let service1 = Service(name: "Test", type: "_http._tcp", domain: "local")
-        let service2 = Service(name: "Test", type: "_http._tcp", domain: "local")
-        let service3 = Service(name: "Other", type: "_http._tcp", domain: "local")
+        let service1 = MDNSService(name: "Test", type: "_http._tcp", domain: "local")
+        let service2 = MDNSService(name: "Test", type: "_http._tcp", domain: "local")
+        let service3 = MDNSService(name: "Other", type: "_http._tcp", domain: "local")
 
         #expect(service1.id == service2.id)
         #expect(service1.id != service3.id)
@@ -298,13 +298,13 @@ struct RFC6763Tests {
 
     @Test("DNS-SD service type suffixes")
     func checkDnsSDServiceTypeSuffixes() {
-        #expect(mDNS.dnsSDServiceTypeSuffix == "._tcp.local.")
-        #expect(mDNS.dnsSDServiceTypeUDPSuffix == "._udp.local.")
+        #expect(DNSWire.dnsSDServiceTypeSuffix == "._tcp.local.")
+        #expect(DNSWire.dnsSDServiceTypeUDPSuffix == "._udp.local.")
     }
 
     @Test("libp2p service type constant")
     func checkLibp2pServiceType() {
-        #expect(mDNS.libp2pServiceType == "_p2p._udp.local.")
+        #expect(DNSWire.libp2pServiceType == "_p2p._udp.local.")
     }
 
     // MARK: - Service Discovery Flow Simulation

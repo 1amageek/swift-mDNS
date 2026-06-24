@@ -3,7 +3,7 @@
 /// Tests for DNS-SD and libp2p TXT record functionality.
 
 import Testing
-@testable import mDNS
+import MDNS
 
 @Suite("TXTRecord Tests")
 struct TXTRecordTests {

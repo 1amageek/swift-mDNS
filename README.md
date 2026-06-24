@@ -14,7 +14,17 @@ A high-performance, pure Swift implementation of Multicast DNS (mDNS) and DNS Se
 ## Requirements
 
 - Swift 6.2+
-- macOS 15+ / iOS 18+ / tvOS 18+ / watchOS 11+ / visionOS 2+
+- macOS 26+ / iOS 18+ / tvOS 18+ / watchOS 11+ / visionOS 2+ (the Embedded-first baseline; the
+  facade surfaces `P2PCore.IPAddress`, whose package floors at macOS 26)
+
+## Products
+
+This package ships two products following the Embedded-first 3-tier API design:
+
+| Product | Tier | Import | Use it for |
+|---------|------|--------|-----------|
+| `MDNS` | Tier-1 facade | `import MDNS` | Browse / advertise services. `[UInt8]` / `MDNSService` / `IPAddress` currency. |
+| `DNSWire` | Tier-3 codec | `import DNSWire` | The Foundation-free DNS/mDNS wire codec. Not pulled in by `import MDNS`. |
 
 ## Installation
 
@@ -26,12 +36,12 @@ dependencies: [
 ]
 ```
 
-Then add `mDNS` to your target dependencies:
+Then add the product(s) you need to your target dependencies:
 
 ```swift
 .target(
     name: "YourTarget",
-    dependencies: ["mDNS"]
+    dependencies: ["MDNS"]          // and/or "DNSWire" for the raw codec
 )
 ```
 
@@ -40,60 +50,47 @@ Then add `mDNS` to your target dependencies:
 ### Service Browsing
 
 ```swift
-import mDNS
+import MDNS
 
-let browser = ServiceBrowser()
-try await browser.start()
+let browser = MDNSBrowser()
 
-// Browse for HTTP services
-try await browser.browse(for: "_http._tcp.local.")
-
-for await event in browser.events {
-    switch event {
-    case .found(let service):
-        print("Found: \(service.name) at \(service.hostName ?? "unknown"):\(service.port ?? 0)")
-    case .updated(let service):
-        print("Updated: \(service.name)")
-    case .removed(let service):
-        print("Removed: \(service.name)")
-    case .error(let error):
-        print("Error: \(error)")
-    }
+// Browse for HTTP services; iteration yields MDNSService and throws MDNSError.
+for try await service in try await browser.browse("_http._tcp.local.") {
+    print("Found: \(service.name) at \(service.host ?? "unknown"):\(service.port ?? 0)")
 }
 ```
 
 ### Service Advertising
 
 ```swift
-import mDNS
+import MDNS
 
-let advertiser = ServiceAdvertiser()
-try await advertiser.start()
+let responder = MDNSResponder()
 
-let service = Service(
+let service = MDNSService(
     name: "My Web Server",
     type: "_http._tcp",
     port: 8080,
-    txtRecord: TXTRecord(["path": "/api", "version": "1.0"])
+    txt: ["path": Array("/api".utf8), "version": Array("1.0".utf8)]
 )
 
-try await advertiser.register(service)
+try await responder.advertise(service)
 
-// Later, to unregister:
-try await advertiser.unregister(service)
+// Later, to withdraw:
+try await responder.withdraw(service)
 ```
 
 ### Low-Level DNS Message Handling
 
 ```swift
-import mDNS
+import DNSWire
 
 // Create a query
 let query = try DNSMessage.mdnsQuery(for: "_http._tcp.local.")
-let encoded = query.encode()
+let encoded: [UInt8] = query.encode()
 
 // Decode a response
-let message = try DNSMessage.decode(from: receivedData)
+let message = try DNSMessage.decode(from: receivedBytes)
 for answer in message.answers {
     print("\(answer.name) \(answer.type) TTL=\(answer.ttl)")
 
@@ -117,7 +114,7 @@ for answer in message.answers {
 ### Working with DNS Names
 
 ```swift
-import mDNS
+import DNSWire
 
 // Create from string
 let name = try DNSName("_http._tcp.local.")
@@ -133,13 +130,13 @@ print(name == name3)  // true
 let encoded = name.encode()
 
 // Decode from wire format
-let (decoded, bytesConsumed) = try DNSName.decode(from: data, at: 0)
+let (decoded, bytesConsumed) = try DNSName.decode(from: bytes, at: 0)
 ```
 
 ### Working with IP Addresses
 
 ```swift
-import mDNS
+import DNSWire
 
 // IPv4
 let ipv4 = IPv4Address(192, 168, 1, 100)
@@ -209,10 +206,10 @@ swift test --filter Benchmark
 
 | Type | Description |
 |------|-------------|
-| `Service` | Represents a discovered or advertised DNS-SD service |
+| `MDNSService` | Represents a discovered or advertised DNS-SD service (`addresses: [IPAddress]`, `txt: [String: [UInt8]]`) |
 | `TXTRecord` | Key-value TXT record attributes (case-insensitive keys) |
-| `ServiceBrowser` | Actor for browsing services via mDNS |
-| `ServiceAdvertiser` | Actor for advertising services via mDNS |
+| `MDNSBrowser` | Actor for browsing services via mDNS |
+| `MDNSResponder` | Actor for advertising services via mDNS |
 
 ### DNS Record Types
 

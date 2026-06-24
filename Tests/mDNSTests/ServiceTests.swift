@@ -1,13 +1,14 @@
 import Testing
-import Foundation
-@testable import mDNS
+import MDNS
+import DNSWire
+import P2PCoreTransport
 
 @Suite("Service Tests")
 struct ServiceTests {
 
     @Test("Create service with required fields")
     func createService() {
-        let service = Service(
+        let service = MDNSService(
             name: "My Web Server",
             type: "_http._tcp",
             port: 8080
@@ -23,42 +24,42 @@ struct ServiceTests {
 
     @Test("Service with TXT record")
     func serviceWithTXT() {
-        var txtRecord = TXTRecord()
-        txtRecord["path"] = "/api"
-        txtRecord["version"] = "1.0"
-
-        let service = Service(
+        let service = MDNSService(
             name: "API Server",
             type: "_http._tcp",
             port: 3000,
-            txtRecord: txtRecord
+            txt: [
+                "path": Array("/api".utf8),
+                "version": Array("1.0".utf8)
+            ]
         )
 
-        #expect(service.txtRecord["path"] == "/api")
-        #expect(service.txtRecord["version"] == "1.0")
+        #expect(service.txt["path"] == Array("/api".utf8))
+        #expect(service.txt["version"] == Array("1.0".utf8))
     }
 
     @Test("Service resolution status")
     func resolutionStatus() {
-        var service = Service(name: "Test", type: "_test._tcp")
+        var service = MDNSService(name: "Test", type: "_test._tcp", port: nil)
 
         #expect(service.isResolved == false)
         #expect(service.hasAddresses == false)
 
-        service.hostName = "test.local"
+        service.host = "test.local"
         service.port = 1234
 
         #expect(service.isResolved == true)
         #expect(service.hasAddresses == false)
 
-        service.ipv4Addresses.append(IPv4Address(192, 168, 1, 1))
+        service.addresses.append(.v4(192, 168, 1, 1))
 
         #expect(service.hasAddresses == true)
+        #expect(service.ipv4Addresses.count == 1)
     }
 
     @Test("Service ID is full name")
     func serviceId() {
-        let service = Service(
+        let service = MDNSService(
             name: "My Service",
             type: "_http._tcp",
             domain: "local"

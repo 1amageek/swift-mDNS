@@ -10,7 +10,7 @@
 
 import Testing
 import Foundation
-@testable import mDNS
+import DNSWire
 
 @Suite("Profiling Tests")
 struct ProfilingTests {

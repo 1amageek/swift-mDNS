@@ -3,8 +3,8 @@
 /// Tests for proper error handling of malformed DNS messages.
 
 import Testing
-import Foundation
-@testable import mDNS
+@testable import MDNS
+import DNSWire
 
 private actor FakeMDNSTransport: MDNSTransport {
     let messages: AsyncStream<ReceivedDNSMessage> = AsyncStream { continuation in
@@ -23,7 +23,7 @@ struct ErrorHandlingTests {
 
     @Test("Truncated header (less than 12 bytes)")
     func truncatedHeader() throws {
-        let shortData = Data([0x00, 0x00, 0x00, 0x00])  // Only 4 bytes
+        let shortData = [UInt8]([0x00, 0x00, 0x00, 0x00])  // Only 4 bytes
 
         #expect(throws: DNSError.self) {
             _ = try DNSMessage.decode(from: shortData)
@@ -32,7 +32,7 @@ struct ErrorHandlingTests {
 
     @Test("Empty data throws")
     func emptyData() throws {
-        let emptyData = Data()
+        let emptyData = [UInt8]()
 
         #expect(throws: DNSError.self) {
             _ = try DNSMessage.decode(from: emptyData)
@@ -42,7 +42,7 @@ struct ErrorHandlingTests {
     @Test("Exactly 12 bytes (header only, no questions)")
     func headerOnly() throws {
         // Valid header with 0 questions, 0 answers, etc.
-        var data = Data()
+        var data = [UInt8]()
         data.append(contentsOf: [0x00, 0x00])  // ID
         data.append(contentsOf: [0x00, 0x00])  // Flags
         data.append(contentsOf: [0x00, 0x00])  // QDCOUNT = 0
@@ -59,7 +59,7 @@ struct ErrorHandlingTests {
 
     @Test("Truncated name label")
     func truncatedNameLabel() throws {
-        var data = Data()
+        var data = [UInt8]()
         // Header
         data.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
         data.append(contentsOf: [0x00, 0x01])  // 1 question
@@ -76,7 +76,7 @@ struct ErrorHandlingTests {
 
     @Test("Name without terminator")
     func nameWithoutTerminator() throws {
-        var data = Data()
+        var data = [UInt8]()
         // Header
         data.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
         data.append(contentsOf: [0x00, 0x01])  // 1 question
@@ -94,7 +94,7 @@ struct ErrorHandlingTests {
 
     @Test("Truncated compression pointer")
     func truncatedCompressionPointer() throws {
-        var data = Data()
+        var data = [UInt8]()
         data.append(0xC0)  // Compression pointer marker
         // Missing second byte of pointer
 
@@ -107,7 +107,7 @@ struct ErrorHandlingTests {
 
     @Test("Truncated question (missing type)")
     func truncatedQuestionMissingType() throws {
-        var data = Data()
+        var data = [UInt8]()
         // Header
         data.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
         data.append(contentsOf: [0x00, 0x01])  // 1 question
@@ -126,7 +126,7 @@ struct ErrorHandlingTests {
 
     @Test("Truncated question (missing class)")
     func truncatedQuestionMissingClass() throws {
-        var data = Data()
+        var data = [UInt8]()
         // Header
         data.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
         data.append(contentsOf: [0x00, 0x01])  // 1 question
@@ -148,7 +148,7 @@ struct ErrorHandlingTests {
 
     @Test("Truncated resource record (missing TTL)")
     func truncatedRecordMissingTTL() throws {
-        var data = Data()
+        var data = [UInt8]()
         // Header
         data.append(contentsOf: [0x00, 0x00, 0x84, 0x00])  // Response
         data.append(contentsOf: [0x00, 0x00])  // 0 questions
@@ -170,7 +170,7 @@ struct ErrorHandlingTests {
 
     @Test("Truncated resource record (missing RDATA)")
     func truncatedRecordMissingRDATA() throws {
-        var data = Data()
+        var data = [UInt8]()
         // Header
         data.append(contentsOf: [0x00, 0x00, 0x84, 0x00])  // Response
         data.append(contentsOf: [0x00, 0x00])  // 0 questions
@@ -196,7 +196,7 @@ struct ErrorHandlingTests {
 
     @Test("Invalid A record length (not 4 bytes)")
     func invalidARecordLength() throws {
-        var data = Data()
+        var data = [UInt8]()
         // Header
         data.append(contentsOf: [0x00, 0x00, 0x84, 0x00])
         data.append(contentsOf: [0x00, 0x00])
@@ -220,7 +220,7 @@ struct ErrorHandlingTests {
 
     @Test("Invalid AAAA record length (not 16 bytes)")
     func invalidAAAARecordLength() throws {
-        var data = Data()
+        var data = [UInt8]()
         // Header
         data.append(contentsOf: [0x00, 0x00, 0x84, 0x00])
         data.append(contentsOf: [0x00, 0x00])
@@ -242,28 +242,27 @@ struct ErrorHandlingTests {
         }
     }
 
-    @Test("ServiceAdvertiser rejects invalid service names instead of crashing")
-    func serviceAdvertiserRejectsInvalidServiceNames() async throws {
-        let advertiser = ServiceAdvertiser(transport: FakeMDNSTransport())
-        try await advertiser.start()
+    @Test("MDNSResponder rejects invalid service names instead of crashing")
+    func responderRejectsInvalidServiceNames() async throws {
+        let responder = MDNSResponder(transport: FakeMDNSTransport())
 
-        let invalidService = Service(
+        let invalidService = MDNSService(
             name: "bad",
             type: String(repeating: "a", count: 64),
-            hostName: "host.local",
+            host: "host.local",
             port: 8080
         )
 
-        await #expect(throws: DNSError.self) {
-            try await advertiser.register(invalidService)
+        await #expect(throws: MDNSError.self) {
+            try await responder.advertise(invalidService)
         }
 
-        try await advertiser.shutdown()
+        await responder.stop()
     }
 
     @Test("Truncated TXT record string")
     func truncatedTXTString() throws {
-        var data = Data()
+        var data = [UInt8]()
         // Header
         data.append(contentsOf: [0x00, 0x00, 0x84, 0x00])
         data.append(contentsOf: [0x00, 0x00])
@@ -288,7 +287,7 @@ struct ErrorHandlingTests {
 
     @Test("Truncated SRV record")
     func truncatedSRVRecord() throws {
-        var data = Data()
+        var data = [UInt8]()
         // Header
         data.append(contentsOf: [0x00, 0x00, 0x84, 0x00])
         data.append(contentsOf: [0x00, 0x00])
@@ -315,7 +314,7 @@ struct ErrorHandlingTests {
 
     @Test("Label length exceeds 63")
     func labelLengthExceeds63() throws {
-        var data = Data()
+        var data = [UInt8]()
         data.append(64)  // Invalid label length (max is 63)
         // This should fail even without the label content
 
@@ -327,7 +326,7 @@ struct ErrorHandlingTests {
     @Test("Reserved label type (01xxxxxx)")
     func reservedLabelType() throws {
         // Label types 01xxxxxx (0x40-0x7F) and 10xxxxxx (0x80-0xBF) are reserved per RFC 1035
-        var data = Data()
+        var data = [UInt8]()
         data.append(0x40)  // 01000000 - reserved extended label type
 
         // Implementation explicitly detects reserved label types
@@ -339,7 +338,7 @@ struct ErrorHandlingTests {
     @Test("Reserved label type (10xxxxxx)")
     func reservedLabelType10() throws {
         // 10xxxxxx (0x80-0xBF) is reserved for future use per RFC 1035
-        var data = Data()
+        var data = [UInt8]()
         data.append(0x80)  // 10000000 - reserved
 
         #expect(throws: DNSError.self) {
@@ -351,7 +350,7 @@ struct ErrorHandlingTests {
 
     @Test("Fewer questions than QDCOUNT")
     func fewerQuestionsThanCount() throws {
-        var data = Data()
+        var data = [UInt8]()
         // Header says 2 questions, but only 1 follows
         data.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
         data.append(contentsOf: [0x00, 0x02])  // QDCOUNT = 2
@@ -370,7 +369,7 @@ struct ErrorHandlingTests {
 
     @Test("Fewer answers than ANCOUNT")
     func fewerAnswersThanCount() throws {
-        var data = Data()
+        var data = [UInt8]()
         // Header says 2 answers, but only 1 follows
         data.append(contentsOf: [0x00, 0x00, 0x84, 0x00])
         data.append(contentsOf: [0x00, 0x00])  // 0 questions

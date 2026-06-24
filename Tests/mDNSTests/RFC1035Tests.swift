@@ -4,8 +4,7 @@
 /// https://tools.ietf.org/html/rfc1035
 
 import Testing
-import Foundation
-@testable import mDNS
+import DNSWire
 
 @Suite("RFC 1035 - DNS Implementation and Specification")
 struct RFC1035Tests {
@@ -53,7 +52,7 @@ struct RFC1035Tests {
         // Offset 0: \x07example\x05local\x00 (14 bytes: 1+7+1+5+1=15, but actually 14 due to how it's structured)
         // Let's recalculate: 1(len)+7(example)+1(len)+5(local)+1(null) = 15 bytes
         // Offset 15: \x03www\xC0\x00 (pointer to offset 0)
-        var data = Data()
+        var data = [UInt8]()
 
         // First name: "example.local." - total 15 bytes
         data.append(7)                          // offset 0
@@ -80,7 +79,7 @@ struct RFC1035Tests {
         // Offset 0: \x05local\x00 (7 bytes: 1+5+1=7)
         // Offset 7: \x07example\xC0\x00 (10 bytes: 1+7+2=10, pointer to offset 0 "local")
         // Offset 17: \x03www\xC0\x07 (6 bytes: 1+3+2=6, pointer to offset 7 "example.local")
-        var data = Data()
+        var data = [UInt8]()
 
         // First name: "local." at offset 0
         data.append(5)                        // offset 0
@@ -108,7 +107,7 @@ struct RFC1035Tests {
     @Test("Compression pointer loop detection")
     func compressionPointerLoop() throws {
         // Create a pointer that points to itself
-        var data = Data()
+        var data = [UInt8]()
         data.append(0xC0)  // Compression pointer marker
         data.append(0x00)  // Point to offset 0 (self-reference)
 
@@ -122,7 +121,7 @@ struct RFC1035Tests {
         // Create two pointers that point to each other
         // Offset 0: pointer to offset 2
         // Offset 2: pointer to offset 0
-        var data = Data()
+        var data = [UInt8]()
         data.append(0xC0)
         data.append(0x02)  // Point to offset 2
         data.append(0xC0)
@@ -136,7 +135,7 @@ struct RFC1035Tests {
     @Test("Compression pointer to invalid offset throws error")
     func pointerToInvalidOffset() throws {
         // Pointer to offset beyond data - RFC 1035 requires valid offsets
-        var data = Data()
+        var data = [UInt8]()
         data.append(0xC0)
         data.append(0x10)  // Point to offset 16 (beyond 2-byte data)
 
@@ -148,7 +147,7 @@ struct RFC1035Tests {
     @Test("Compression pointer forward reference throws error")
     func pointerForwardReference() throws {
         // Offset 0 points forward to offset 2, which RFC 1035 forbids.
-        var data = Data()
+        var data = [UInt8]()
         data.append(0xC0)
         data.append(0x02)
         data.append(0x00)
@@ -173,7 +172,7 @@ struct RFC1035Tests {
 
     @Test("Root domain decoding")
     func rootDomainDecoding() throws {
-        let data = Data([0x00])  // Single null byte = root
+        let data: [UInt8] = [0x00]  // Single null byte = root
         let (name, bytesConsumed) = try DNSName.decode(from: data, at: 0)
 
         #expect(name.isRoot)

@@ -1,6 +1,7 @@
 import Testing
 import Foundation
-@testable import mDNS
+@testable import MDNS
+import DNSWire
 
 @Suite("Multicast Debug Tests")
 struct MulticastDebugTests {
@@ -96,18 +97,23 @@ struct MulticastDebugTests {
         }
     }
 
-    @Test("Debug: ServiceAdvertiser can start")
-    func serviceAdvertiserCanStart() async throws {
-        let advertiser = ServiceAdvertiser()
+    @Test("Debug: MDNSResponder can advertise and stop")
+    func responderCanStart() async throws {
+        let responder = MDNSResponder()
 
         do {
-            try await advertiser.start()
-            print("✅ ServiceAdvertiser started")
+            let service = MDNSService(
+                name: "Test Service",
+                type: "_test._tcp",
+                port: 12345
+            )
+            try await responder.advertise(service)
+            print("✅ MDNSResponder advertised")
 
-            try await advertiser.shutdown()
-            print("✅ ServiceAdvertiser shutdown")
+            await responder.stop()
+            print("✅ MDNSResponder stopped")
         } catch {
-            print("❌ Advertiser error: \(error)")
+            print("❌ Responder error: \(error)")
             if isUnavailableMulticastEnvironment(error) {
                 print("Skipping multicast debug test because this environment has no multicast interface")
                 return
@@ -116,25 +122,22 @@ struct MulticastDebugTests {
         }
     }
 
-    @Test("Debug: ServiceAdvertiser can register")
-    func serviceAdvertiserCanRegister() async throws {
-        let advertiser = ServiceAdvertiser()
+    @Test("Debug: MDNSResponder can advertise a service")
+    func responderCanRegister() async throws {
+        let responder = MDNSResponder()
 
         do {
-            try await advertiser.start()
-            print("✅ Advertiser started")
-
-            let service = Service(
+            let service = MDNSService(
                 name: "Test Service",
                 type: "_test._tcp",
                 port: 12345
             )
 
-            print("📝 Registering service: \(service.fullName)")
-            try await advertiser.register(service)
-            print("✅ Service registered!")
+            print("📝 Advertising service: \(service.fullName)")
+            try await responder.advertise(service)
+            print("✅ Service advertised!")
 
-            try await advertiser.shutdown()
+            await responder.stop()
         } catch {
             print("❌ Register error: \(error)")
             print("Error type: \(type(of: error))")

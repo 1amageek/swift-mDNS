@@ -1,6 +1,5 @@
 import Testing
-import Foundation
-@testable import mDNS
+import DNSWire
 
 @Suite("DNS Message Tests")
 struct DNSMessageTests {
@@ -168,7 +167,7 @@ struct DNSMessageTests {
 
     @Test("Truncated message throws")
     func truncatedMessageThrows() {
-        let data = Data([0x00, 0x00]) // Only 2 bytes, header needs 12
+        let data: [UInt8] = [0x00, 0x00] // Only 2 bytes, header needs 12
         #expect(throws: DNSError.self) {
             _ = try DNSMessage.decode(from: data)
         }

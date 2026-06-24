@@ -1,110 +1,9 @@
-/// DNS-SD Service Model
+/// DNS-SD TXT Record helper (Tier-1 facade)
 ///
-/// Represents a discovered or advertised service per RFC 6763.
-
-import Foundation
-
-/// A DNS-SD service instance.
-///
-/// A service consists of:
-/// - Service name (e.g., "My Printer")
-/// - Service type (e.g., "_ipp._tcp")
-/// - Domain (e.g., "local")
-/// - Host and port from SRV record
-/// - TXT record attributes
-public struct Service: Sendable, Hashable, Identifiable {
-
-    /// Unique identifier for this service.
-    public var id: String {
-        fullName
-    }
-
-    /// The service instance name (e.g., "My Printer").
-    public let name: String
-
-    /// The service type (e.g., "_ipp._tcp").
-    public let type: String
-
-    /// The domain (e.g., "local").
-    public let domain: String
-
-    /// The target hostname from SRV record.
-    public var hostName: String?
-
-    /// The port number from SRV record.
-    public var port: UInt16?
-
-    /// Priority from SRV record (lower is better).
-    public var priority: UInt16
-
-    /// Weight from SRV record for load balancing.
-    public var weight: UInt16
-
-    /// IPv4 addresses from A records.
-    public var ipv4Addresses: [IPv4Address]
-
-    /// IPv6 addresses from AAAA records.
-    public var ipv6Addresses: [IPv6Address]
-
-    /// TXT record attributes.
-    public var txtRecord: TXTRecord
-
-    /// Time-to-live for this service record.
-    public var ttl: UInt32
-
-    /// When this service was last seen/updated.
-    public var lastSeen: Date
-
-    /// The full service name (name.type.domain.).
-    public var fullName: String {
-        "\(name).\(type).\(domain)."
-    }
-
-    /// The service type with domain (type.domain.).
-    public var fullType: String {
-        "\(type).\(domain)."
-    }
-
-    public init(
-        name: String,
-        type: String,
-        domain: String = "local",
-        hostName: String? = nil,
-        port: UInt16? = nil,
-        priority: UInt16 = 0,
-        weight: UInt16 = 0,
-        ipv4Addresses: [IPv4Address] = [],
-        ipv6Addresses: [IPv6Address] = [],
-        txtRecord: TXTRecord = TXTRecord(),
-        ttl: UInt32 = mdnsDefaultTTL,
-        lastSeen: Date = Date()
-    ) {
-        self.name = name
-        self.type = type
-        self.domain = domain
-        self.hostName = hostName
-        self.port = port
-        self.priority = priority
-        self.weight = weight
-        self.ipv4Addresses = ipv4Addresses
-        self.ipv6Addresses = ipv6Addresses
-        self.txtRecord = txtRecord
-        self.ttl = ttl
-        self.lastSeen = lastSeen
-    }
-
-    /// Whether this service has been fully resolved (has SRV data).
-    public var isResolved: Bool {
-        hostName != nil && port != nil
-    }
-
-    /// Whether this service has address records.
-    public var hasAddresses: Bool {
-        !ipv4Addresses.isEmpty || !ipv6Addresses.isEmpty
-    }
-}
-
-// MARK: - TXT Record
+/// A string-keyed convenience over DNS TXT records per RFC 6763 Section 6.
+/// Foundation-free. The raw `[UInt8]` TXT values live on `MDNSService.txt`; this
+/// helper offers an ergonomic string-based API for building / parsing TXT
+/// attributes.
 
 /// A DNS TXT record containing key-value attributes.
 ///
@@ -112,21 +11,21 @@ public struct Service: Sendable, Hashable, Identifiable {
 /// each in the format "key=value" or just "key" for boolean attributes.
 ///
 /// This implementation supports both DNS-SD (single value per key) and
-/// libp2p extensions (multiple values per key, e.g., multiple `dnsaddr=` entries).
+/// libp2p extensions (multiple values per key, e.g. multiple `dnsaddr=` entries).
 ///
 /// ## Design
 ///
-/// - **Storage**: Raw DNS wire format (`[String]`) with index for O(1) lookup
-/// - **DNS-SD API**: `subscript` returns first value only (RFC 6763 compliant)
+/// - **Storage**: Raw DNS wire-string form (`[String]`) with index for O(1) lookup
+/// - **DNS-SD API**: `subscript` returns the first value only (RFC 6763 compliant)
 /// - **libp2p API**: `values(forKey:)`, `appendValue(_:forKey:)` for multiple values
 public struct TXTRecord: Sendable, Hashable {
 
     // MARK: - Storage
 
-    /// DNS本来の形式（順序保持）
+    /// DNS wire-string form (preserves order).
     private var rawStrings: [String]
 
-    /// 高速アクセス用インデックス（キー → 文字列配列内のインデックス）
+    /// Index for fast lookup (key -> indices into `rawStrings`).
     private var index: [String: [Int]]
 
     // MARK: - Initialization
@@ -178,7 +77,7 @@ public struct TXTRecord: Sendable, Hashable {
     /// Returns all values for a key (case-insensitive).
     ///
     /// Use this when you need to access multiple values for the same key
-    /// (e.g., libp2p's multiple `dnsaddr=` entries).
+    /// (e.g. libp2p's multiple `dnsaddr=` entries).
     public func values(forKey key: String) -> [String] {
         let lowercasedKey = key.lowercased()
         guard let indices = index[lowercasedKey] else { return [] }
@@ -212,12 +111,12 @@ public struct TXTRecord: Sendable, Hashable {
         let lowercasedKey = key.lowercased()
         guard let indices = index[lowercasedKey] else { return }
 
-        // 逆順で削除（インデックスずれ防止）
+        // Remove in reverse order to keep earlier indices valid.
         for idx in indices.sorted().reversed() {
             rawStrings.remove(at: idx)
         }
 
-        // インデックス再構築
+        // Rebuild the index.
         index = Self.buildIndex(from: rawStrings)
     }
 
@@ -259,45 +158,5 @@ public struct TXTRecord: Sendable, Hashable {
             return ""  // Boolean attribute
         }
         return nil
-    }
-}
-
-// MARK: - Service Type
-
-/// Common DNS-SD service types.
-public enum ServiceType {
-    /// HTTP web service.
-    public static let http = "_http._tcp"
-
-    /// HTTPS web service.
-    public static let https = "_https._tcp"
-
-    /// SSH service.
-    public static let ssh = "_ssh._tcp"
-
-    /// FTP service.
-    public static let ftp = "_ftp._tcp"
-
-    /// Printer (IPP).
-    public static let ipp = "_ipp._tcp"
-
-    /// AirPlay.
-    public static let airplay = "_airplay._tcp"
-
-    /// Apple File Sharing (AFP).
-    public static let afp = "_afpovertcp._tcp"
-
-    /// SMB file sharing.
-    public static let smb = "_smb._tcp"
-
-    /// SFTP service.
-    public static let sftp = "_sftp-ssh._tcp"
-
-    /// libp2p peer.
-    public static let libp2p = "_p2p._udp"
-
-    /// Returns the full service type string with domain.
-    public static func fullType(_ type: String, domain: String = "local") -> String {
-        "\(type).\(domain)."
     }
 }

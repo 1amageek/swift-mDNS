@@ -4,8 +4,7 @@
 /// interoperability with other implementations (macOS Bonjour, Avahi, etc.)
 
 import Testing
-import Foundation
-@testable import mDNS
+import DNSWire
 
 @Suite("Wire Format - Interoperability Tests")
 struct WireFormatTests {
@@ -16,7 +15,7 @@ struct WireFormatTests {
     func parseStandardPTRQuery() throws {
         // Standard mDNS query for _http._tcp.local.
         // Captured format of a typical Bonjour query
-        let packet = Data([
+        let packet = [UInt8]([
             // Header (12 bytes)
             0x00, 0x00,  // ID = 0 (mDNS)
             0x00, 0x00,  // Flags: Standard query
@@ -46,7 +45,7 @@ struct WireFormatTests {
     @Test("Parse mDNS query with QU bit set")
     func parseQueryWithQUBit() throws {
         // mDNS query with unicast response requested (QU bit)
-        let packet = Data([
+        let packet = [UInt8]([
             // Header
             0x00, 0x00,  // ID = 0
             0x00, 0x00,  // Flags
@@ -72,7 +71,7 @@ struct WireFormatTests {
     @Test("Parse mDNS A record response")
     func parseARecordResponse() throws {
         // mDNS response with A record
-        let packet = Data([
+        let packet = [UInt8]([
             // Header
             0x00, 0x00,  // ID = 0
             0x84, 0x00,  // Flags: Response, Authoritative
@@ -109,7 +108,7 @@ struct WireFormatTests {
     @Test("Parse mDNS response with cache-flush bit")
     func parseResponseWithCacheFlush() throws {
         // mDNS response with cache-flush bit set
-        let packet = Data([
+        let packet = [UInt8]([
             // Header
             0x00, 0x00, 0x84, 0x00,
             0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
@@ -134,7 +133,7 @@ struct WireFormatTests {
     @Test("Parse mDNS PTR response for service discovery")
     func parsePTRResponse() throws {
         // PTR response pointing to a service instance
-        let packet = Data([
+        let packet = [UInt8]([
             // Header
             0x00, 0x00, 0x84, 0x00,
             0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
@@ -241,7 +240,7 @@ struct WireFormatTests {
 
     @Test("Parse mDNS AAAA record response")
     func parseAAAARecordResponse() throws {
-        let packet = Data([
+        let packet = [UInt8]([
             // Header
             0x00, 0x00, 0x84, 0x00,
             0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
@@ -275,7 +274,7 @@ struct WireFormatTests {
 
     @Test("Parse mDNS goodbye packet (TTL = 0)")
     func parseGoodbyePacket() throws {
-        let packet = Data([
+        let packet = [UInt8]([
             // Header
             0x00, 0x00, 0x84, 0x00,
             0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
@@ -415,7 +414,7 @@ struct WireFormatTests {
 
     @Test("Empty TXT record in wire format")
     func emptyTXTRecordWireFormat() throws {
-        let packet = Data([
+        let packet = [UInt8]([
             // Header
             0x00, 0x00, 0x84, 0x00,
             0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,

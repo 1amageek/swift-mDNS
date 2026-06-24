@@ -1,6 +1,5 @@
 import Testing
-import Foundation
-@testable import mDNS
+import DNSWire
 
 @Suite("DNSName Tests")
 struct DNSNameTests {
@@ -45,7 +44,7 @@ struct DNSNameTests {
     @Test("Decode DNS name")
     func decode() throws {
         // Encode "\x03www\x07example\x05local\x00"
-        var data = Data()
+        var data = [UInt8]()
         data.append(3)
         data.append(contentsOf: "www".utf8)
         data.append(7)
@@ -65,7 +64,7 @@ struct DNSNameTests {
     func decodeWithCompression() throws {
         // First name at offset 0: "\x03www\x07example\x05local\x00" (19 bytes)
         // Second name at offset 19: "\x04mail\xc0\x04" (pointer to offset 4 = "example.local")
-        var data = Data()
+        var data = [UInt8]()
 
         // First name (19 bytes total)
         data.append(3)

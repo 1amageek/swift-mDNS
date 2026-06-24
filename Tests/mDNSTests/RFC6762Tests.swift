@@ -5,7 +5,7 @@
 
 import Testing
 import Foundation
-@testable import mDNS
+import DNSWire
 
 @Suite("RFC 6762 - Multicast DNS")
 struct RFC6762Tests {
@@ -45,17 +45,17 @@ struct RFC6762Tests {
 
     @Test("mDNS IPv4 multicast address is 224.0.0.251")
     func checkMdnsIPv4Address() {
-        #expect(mDNS.mdnsIPv4Address == "224.0.0.251")
+        #expect(DNSWire.mdnsIPv4Address == "224.0.0.251")
     }
 
     @Test("mDNS IPv6 multicast address is ff02::fb")
     func checkMdnsIPv6Address() {
-        #expect(mDNS.mdnsIPv6Address == "ff02::fb")
+        #expect(DNSWire.mdnsIPv6Address == "ff02::fb")
     }
 
     @Test("mDNS port is 5353")
     func checkMdnsPort() {
-        #expect(mDNS.mdnsPort == 5353)
+        #expect(DNSWire.mdnsPort == 5353)
     }
 
     // MARK: - Section 10.2: Cache-Flush Bit
@@ -244,12 +244,12 @@ struct RFC6762Tests {
 
     @Test("mDNS default TTL constant")
     func checkMdnsDefaultTTL() {
-        #expect(mDNS.mdnsDefaultTTL == 120)
+        #expect(DNSWire.mdnsDefaultTTL == 120)
     }
 
     @Test("mDNS goodbye TTL constant")
     func checkMdnsGoodbyeTTL() {
-        #expect(mDNS.mdnsGoodbyeTTL == 0)
+        #expect(DNSWire.mdnsGoodbyeTTL == 0)
     }
 
     // MARK: - Section 6: Authoritative Answer Flag
@@ -280,12 +280,12 @@ struct RFC6762Tests {
     func checkMdnsMaxMessageSize() {
         // mDNS messages can be larger than standard DNS UDP (512 bytes)
         // because multicast doesn't have the same fragmentation concerns
-        #expect(mDNS.mdnsMaxMessageSize == 9000)
+        #expect(DNSWire.mdnsMaxMessageSize == 9000)
     }
 
     @Test("Standard DNS UDP max size constant")
     func checkDnsMaxUDPMessageSize() {
-        #expect(mDNS.dnsMaxUDPMessageSize == 512)
+        #expect(DNSWire.dnsMaxUDPMessageSize == 512)
     }
 
     // MARK: - Multiple record types in query

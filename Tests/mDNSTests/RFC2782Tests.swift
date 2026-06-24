@@ -5,7 +5,7 @@
 
 import Testing
 import Foundation
-@testable import mDNS
+import DNSWire
 
 @Suite("RFC 2782 - DNS SRV Records")
 struct RFC2782Tests {

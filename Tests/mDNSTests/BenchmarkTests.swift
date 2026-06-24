@@ -4,7 +4,7 @@
 
 import Testing
 import Foundation
-@testable import mDNS
+import DNSWire
 
 @Suite("Performance Benchmarks")
 struct BenchmarkTests {
@@ -350,7 +350,7 @@ struct BenchmarkTests {
         for _ in 0..<iterations {
             var buffer = WriteBuffer(capacity: 512)
             message.encode(to: &buffer)
-            _ = buffer.toData()
+            _ = buffer.toArray()
         }
         let elapsed = Date.timeIntervalSinceReferenceDate - start
 

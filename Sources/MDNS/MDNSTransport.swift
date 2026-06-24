@@ -6,6 +6,33 @@ import Foundation
 import NIOCore
 import NIOUDPTransport
 import Synchronization
+import DNSWire
+
+// MARK: - Internal [UInt8] <-> ByteBuffer adapters (host-only NIO edge)
+
+extension DNSMessage {
+    /// Encodes the message to a NIO `ByteBuffer` for the multicast send path.
+    ///
+    /// One bulk copy at the NIO edge; `encode()` produces the `[UInt8]` payload.
+    @inline(__always)
+    func encodeToByteBuffer(allocator: ByteBufferAllocator) -> ByteBuffer {
+        let bytes = encode()
+        var buffer = allocator.buffer(capacity: bytes.count)
+        buffer.writeBytes(bytes)
+        return buffer
+    }
+
+    /// Decodes a message from an inbound NIO `ByteBuffer`.
+    ///
+    /// One bulk copy at the NIO edge into `[UInt8]`, then the Foundation-free
+    /// codec decodes it.
+    @inline(__always)
+    static func decode(fromBuffer buffer: ByteBuffer) throws(DNSError) -> DNSMessage {
+        var buffer = buffer
+        let bytes = buffer.readBytes(length: buffer.readableBytes) ?? []
+        return try decode(from: bytes)
+    }
+}
 
 #if DEBUG
 private let nioDNSTransportDebugLoggingEnabled =
@@ -21,7 +48,7 @@ private func nioDNSDebugLog(_ message: @autoclosure () -> String) {
 }
 
 /// Protocol for mDNS transport operations.
-public protocol MDNSTransport: Sendable {
+package protocol MDNSTransport: Sendable {
     /// Starts the transport (binds socket, joins multicast groups).
     func start() async throws
 
@@ -36,31 +63,31 @@ public protocol MDNSTransport: Sendable {
 }
 
 /// A received DNS message with its source address.
-public struct ReceivedDNSMessage: Sendable {
+package struct ReceivedDNSMessage: Sendable {
     /// The decoded DNS message.
-    public let message: DNSMessage
+    package let message: DNSMessage
 
     /// The source address that sent this message.
-    public let source: SocketAddress
+    package let source: SocketAddress
 
-    public init(message: DNSMessage, source: SocketAddress) {
+    package init(message: DNSMessage, source: SocketAddress) {
         self.message = message
         self.source = source
     }
 }
 
 /// Configuration for mDNS transport.
-public struct MDNSTransportConfiguration: Sendable {
+package struct MDNSTransportConfiguration: Sendable {
     /// Whether to use IPv4 multicast (224.0.0.251).
-    public var useIPv4: Bool
+    package var useIPv4: Bool
 
     /// Whether to use IPv6 multicast (ff02::fb).
-    public var useIPv6: Bool
+    package var useIPv6: Bool
 
     /// Network interface name to bind to (nil = all interfaces).
-    public var networkInterface: String?
+    package var networkInterface: String?
 
-    public init(
+    package init(
         useIPv4: Bool = true,
         useIPv6: Bool = true,
         networkInterface: String? = nil
@@ -70,7 +97,7 @@ public struct MDNSTransportConfiguration: Sendable {
         self.networkInterface = networkInterface
     }
 
-    public static let `default` = MDNSTransportConfiguration()
+    package static let `default` = MDNSTransportConfiguration()
 }
 
 /// NIO-based mDNS transport implementation.
@@ -95,7 +122,7 @@ public struct MDNSTransportConfiguration: Sendable {
 /// let query = try DNSMessage.mdnsQuery(for: "_http._tcp.local.")
 /// try await transport.send(query)
 /// ```
-public final class NIODNSTransport: MDNSTransport, Sendable {
+package final class NIODNSTransport: MDNSTransport, Sendable {
 
     private let configuration: MDNSTransportConfiguration
 
@@ -106,7 +133,7 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
     private let allocator: ByteBufferAllocator
 
     /// Stream of received DNS messages.
-    public let messages: AsyncStream<ReceivedDNSMessage>
+    package let messages: AsyncStream<ReceivedDNSMessage>
     private let messagesContinuation: AsyncStream<ReceivedDNSMessage>.Continuation
 
     private struct State: Sendable {
@@ -127,14 +154,14 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
     private let decodeFailureCount: Mutex<UInt64>
 
     /// The total number of inbound datagrams dropped due to decode failures.
-    public var droppedDecodeFailureCount: UInt64 {
+    package var droppedDecodeFailureCount: UInt64 {
         decodeFailureCount.withLock { $0 }
     }
 
     /// Creates a new mDNS transport.
     ///
     /// - Parameter configuration: Transport configuration
-    public init(configuration: MDNSTransportConfiguration = .default) {
+    package init(configuration: MDNSTransportConfiguration = .default) {
         self.configuration = configuration
         self.allocator = ByteBufferAllocator()
 
@@ -180,7 +207,7 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
     /// Starts the transport.
     ///
     /// Binds to mDNS port 5353 and joins multicast groups.
-    public func start() async throws {
+    package func start() async throws {
         let alreadyStarted = state.withLock { state in
             if state.isStarted { return true }
             state.isStarted = true
@@ -217,7 +244,7 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
     }
 
     /// Stops the transport.
-    public func shutdown() async throws {
+    package func shutdown() async throws {
         let tasks = state.withLock { state -> (Task<Void, Never>?, Task<Void, Never>?) in
             state.isStarted = false
             let ipv4Task = state.ipv4ReceiveTask
@@ -247,7 +274,7 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
     ///
     /// Sends to both IPv4 and IPv6 multicast groups. Succeeds if at least one
     /// transport sends successfully. Only throws if all enabled transports fail.
-    public func send(_ message: DNSMessage) async throws {
+    package func send(_ message: DNSMessage) async throws {
         // Encode directly to ByteBuffer (zero-copy path)
         let buffer = message.encodeToByteBuffer(allocator: allocator)
         var lastError: Error?
@@ -296,7 +323,7 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
     /// Sends a DNS message to a specific address (for unicast responses).
     ///
     /// Uses zero-copy ByteBuffer encoding for optimal performance.
-    public func send(_ message: DNSMessage, to address: SocketAddress) async throws {
+    package func send(_ message: DNSMessage, to address: SocketAddress) async throws {
         let buffer = message.encodeToByteBuffer(allocator: allocator)
 
         // Determine which transport to use based on address family
@@ -344,7 +371,7 @@ public final class NIODNSTransport: MDNSTransport, Sendable {
             for await datagram in transport.incomingDatagrams {
                 // Decode DNS message directly from ByteBuffer (zero-copy)
                 do {
-                    let message = try DNSMessage.decode(from: datagram.buffer)
+                    let message = try DNSMessage.decode(fromBuffer: datagram.buffer)
                     let received = ReceivedDNSMessage(
                         message: message,
                         source: datagram.remoteAddress

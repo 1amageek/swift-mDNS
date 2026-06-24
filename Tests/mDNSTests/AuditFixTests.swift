@@ -5,8 +5,7 @@
 /// in TXT/HINFO, preservation of unknown enum values, and hostile-input safety.
 
 import Testing
-import Foundation
-@testable import mDNS
+import DNSWire
 
 @Suite("Audit Fix Tests")
 struct AuditFixTests {
@@ -22,8 +21,8 @@ struct AuditFixTests {
         rdata: [UInt8],
         recordClass: UInt16 = 0x0001,
         rdataLengthOverride: UInt16? = nil
-    ) -> Data {
-        var data = Data()
+    ) -> [UInt8] {
+        var data = [UInt8]()
         // Header: response, 0 questions, 1 answer, 0 authority, 0 additional.
         data.append(contentsOf: [0x00, 0x00, 0x84, 0x00])
         data.append(contentsOf: [0x00, 0x00])  // QDCOUNT
@@ -89,7 +88,7 @@ struct AuditFixTests {
         // Build a valid NSEC record with an uncompressed next-domain name and a
         // small type bitmap, encode it, decode it, and confirm fields survive.
         let nextDomain = try DNSName("host.local.")
-        let typeBitmap = Data([0x00, 0x04, 0x40, 0x00, 0x00, 0x08])  // window 0, len 4
+        let typeBitmap: [UInt8] = [0x00, 0x04, 0x40, 0x00, 0x00, 0x08]  // window 0, len 4
         let record = DNSResourceRecord(
             name: try DNSName("host.local."),
             type: .nsec,
@@ -115,7 +114,7 @@ struct AuditFixTests {
     func wireNameExceedsMaxLengthManyLabels() throws {
         // Build a name made of many 4-byte labels ("aaa" => 1 length + 3 bytes) so
         // the encoded total exceeds dnsMaxNameLength (255). 70 labels * 4 = 280 > 255.
-        var name = Data()
+        var name = [UInt8]()
         for _ in 0..<70 {
             name.append(3)
             name.append(contentsOf: "aaa".utf8)
@@ -132,7 +131,7 @@ struct AuditFixTests {
         // Construct a message whose final name uses a compression pointer chain that
         // assembles an over-length name. We place a long base name, then a name that
         // references it via a pointer plus additional labels, pushing total > 255.
-        var data = Data()
+        var data = [UInt8]()
         // Header (12 bytes), QDCOUNT = 1.
         data.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
         data.append(contentsOf: [0x00, 0x01])  // QDCOUNT
@@ -153,7 +152,7 @@ struct AuditFixTests {
         // require type/class which are missing, so this throws either on length or
         // truncation. To specifically exercise the length cap, decode the base name
         // region directly with a trailing pointer appended.
-        var nameWithPointer = Data()
+        var nameWithPointer = [UInt8]()
         for _ in 0..<60 {
             nameWithPointer.append(3)
             nameWithPointer.append(contentsOf: "aaa".utf8)
@@ -171,7 +170,7 @@ struct AuditFixTests {
     @Test("Valid maximum-ish name decodes successfully")
     func validNameDecodes() throws {
         // A name comfortably under the limit must still decode.
-        var name = Data()
+        var name = [UInt8]()
         for _ in 0..<10 {
             name.append(3)
             name.append(contentsOf: "abc".utf8)
@@ -252,7 +251,7 @@ struct AuditFixTests {
     func unknownOpcodePreserved() throws {
         // Opcode field is bits 11-14 of the flags word. Use opcode value 9 (unknown).
         // flags = opcode(9) << 11 = 0x4800.
-        var data = Data()
+        var data = [UInt8]()
         data.append(contentsOf: [0x00, 0x00])  // ID
         data.append(contentsOf: [0x48, 0x00])  // flags: opcode = 9
         data.append(contentsOf: [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
@@ -266,7 +265,7 @@ struct AuditFixTests {
     @Test("Unknown response code is preserved as .unknown, not defaulted to .noError")
     func unknownResponseCodePreserved() throws {
         // Response code is the low 4 bits of flags. Use value 9 (unknown).
-        var data = Data()
+        var data = [UInt8]()
         data.append(contentsOf: [0x00, 0x00])  // ID
         data.append(contentsOf: [0x00, 0x09])  // flags: rcode = 9
         data.append(contentsOf: [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
@@ -316,7 +315,7 @@ struct AuditFixTests {
     func unknownQuestionTypePreserved() throws {
         // A question with an unassigned type value (8888) must decode with the type
         // preserved as .unknown, rather than throwing unsupportedRecordType.
-        var data = Data()
+        var data = [UInt8]()
         data.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
         data.append(contentsOf: [0x00, 0x01])  // QDCOUNT = 1
         data.append(contentsOf: [0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
@@ -338,7 +337,7 @@ struct AuditFixTests {
             name: try DNSName("host.local."),
             type: .unknown(5000),
             ttl: 60,
-            rdata: .unknown(typeValue: 5000, data: Data([0x01, 0x02, 0x03]))
+            rdata: .unknown(typeValue: 5000, data: [0x01, 0x02, 0x03])
         )
         let encoded = record.encode()
         let (decoded, _) = try DNSResourceRecord.decode(from: encoded, at: 0)
@@ -362,7 +361,7 @@ struct AuditFixTests {
         let good = makeSingleAnswerMessage(type: 1, rdata: [192, 168, 1, 1])
         for length in 0...good.count {
             let slice = good.prefix(length)
-            decodeSafely(Data(slice))
+            decodeSafely(Array(slice))
         }
 
         // 2) Fully random buffers of assorted sizes.
@@ -373,7 +372,7 @@ struct AuditFixTests {
             for _ in 0..<size {
                 bytes.append(UInt8.random(in: 0...255, using: &generator))
             }
-            decodeSafely(Data(bytes))
+            decodeSafely(bytes)
         }
 
         // 3) Random buffers carrying a plausible header claiming records, to drive
@@ -389,13 +388,13 @@ struct AuditFixTests {
             for _ in 0..<tail {
                 bytes.append(UInt8.random(in: 0...255, using: &generator))
             }
-            decodeSafely(Data(bytes))
+            decodeSafely(bytes)
         }
     }
 
     /// Decodes a buffer, tolerating any thrown `Error` but failing the test on a trap.
     /// (A trap would crash the process; reaching here at all proves no trap occurred.)
-    private func decodeSafely(_ data: Data) {
+    private func decodeSafely(_ data: [UInt8]) {
         do {
             _ = try DNSMessage.decode(from: data)
         } catch {
