@@ -33,7 +33,16 @@ let packageDependencies: [Package.Dependency] = {
         // Provides the facade currency type `IPAddress` (Foundation-free, Embedded-clean).
         .package(path: "../swift-p2p-core"),
     ]
-    if !embeddedEnabled {
+    if embeddedEnabled {
+        // The Embedded mDNS transport drives the Embedded-clean POSIX multicast
+        // datagram transport (raw sockets, no Foundation/NIO/any). Pulled in ONLY
+        // under Embedded: the host path uses NIO. P2PTransportPOSIX activates its
+        // own Embedded build under `P2P_CORE_EMBEDDED=1`, so the whole Embedded
+        // module graph stays Embedded-consistent (no non-Embedded import).
+        d += [
+            .package(path: "../swift-p2p-transport"),
+        ]
+    } else {
         d += [
             .package(url: "https://github.com/apple/swift-log.git", from: "1.8.0"),
             // embedded-branch only; restore URL before release.
@@ -54,7 +63,12 @@ let mdnsFacadeDependencies: [Target.Dependency] = {
         .product(name: "P2PCoreTransport", package: "swift-p2p-core"),
         .product(name: "P2PCoreCrypto", package: "swift-p2p-core"),
     ]
-    if !embeddedEnabled {
+    if embeddedEnabled {
+        // Embedded multicast I/O via the raw-POSIX multicast datagram transport.
+        d += [
+            .product(name: "P2PTransportPOSIX", package: "swift-p2p-transport"),
+        ]
+    } else {
         d += [
             .product(name: "Logging", package: "swift-log"),
             .product(name: "NIOUDPTransport", package: "swift-nio-udp"),
