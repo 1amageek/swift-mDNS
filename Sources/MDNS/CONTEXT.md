@@ -1,156 +1,102 @@
-# swift-mDNS
+# MDNS — CONTEXT
+Scope/role: the `MDNS` Tier-1 facade (browser / responder) plus its package-internal
+NIO transport seam; built on the Embedded-clean `DNSWire` codec. Depended on by
+peer-discovery callers (libp2p) that want service browse / advertise over mDNS.
+Last reviewed: 2026-06-25
 
-A pure Swift implementation of Multicast DNS (mDNS) and DNS Service Discovery (DNS-SD).
+Invariants and design intent that the source does not state structurally. Read this
+before changing the facade (`Sources/MDNS`) or the wire codec (`Sources/DNSWire`).
+The currency is `[UInt8]` / `MDNSService` / `P2PCore.IPAddress`; this is an
+Embedded-first package, so the codec (`DNSWire`) must stay Foundation-free and the
+facade must keep `Data` / `ByteBuffer` / NIO types off its public surface. The
+README is the structural reference (file tree, type tables, usage); this file is
+the contract.
 
-## Overview
+## Contracts (the load-bearing rules)
 
-This package ships two products following the Embedded-first 3-tier API design:
+- **`DNSWire` is the codec; `MDNS` is the host facade — keep the split.** `import
+  MDNS` does NOT pull in `DNSWire`; a caller building records by hand imports
+  `DNSWire` deliberately. `DNSWire` carries no `swift-p2p-core` dependency, which
+  keeps it off the macOS-26 `Span` floor and lets it compile under Embedded Swift.
+  Do not introduce a `DNSWire -> P2PCore` (or `DNSWire -> NIO`) edge.
+- **`MDNSTransport` is a `package` protocol, not public.** It is the injection seam
+  used by tests and the `NIODNSTransport` adapter. `NIODNSTransport` is the single
+  place where `[UInt8]` crosses to / from a NIO `ByteBuffer` (one bulk copy at the
+  datagram edge in `encodeToByteBuffer` / `decode(fromBuffer:)`). Do not let NIO
+  types leak past this seam into the browser / responder.
+- **`browse(_:)` returns the named `MDNSDiscoveries`** — an `AsyncSequence` with
+  `Element == MDNSService`, `Failure == MDNSError` (typed throws). It is NOT an
+  opaque `some AsyncSequence` and NOT an `AsyncThrowingStream` (whose `Failure` is
+  pinned to `any Error`). Calling `browse` again adds another service type to the
+  same stream and returns it again; keep that single-stream behavior.
+- **Discovery is upsert-only — there is no event enum.** There is no
+  `.found` / `.updated` / `.removed` case. An updated or removed service is
+  delivered as a fresh `MDNSService` value carrying the current state; consumers
+  deduplicate on `MDNSService.id` (the full service name). Do not add a
+  synthesized "unreachable" / removal sentinel: a goodbye (TTL == 0) re-emits the
+  last-known state of the removed service, and that is the only removal signal.
+- **TXT values are raw `[UInt8]`** on `MDNSService` (`txt: [String: [UInt8]]`),
+  per the byte currency — there is no String-valued TXT API. On the wire they are
+  rendered as `key=value` (or bare `key` for an empty value) and parsed back to
+  bytes. Do not add a String-valued TXT path to the facade.
 
-- **`MDNS`** (Tier-1 facade) — `MDNSBrowser` / `MDNSResponder` / `MDNSService` / `MDNSError`.
-  Currency is `[UInt8]` / `MDNSService` / `P2PCore.IPAddress`. Network I/O is performed
-  via NIO internally; no `Data` / `ByteBuffer` / NIO type appears on the public surface.
-- **`DNSWire`** (Tier-3 codec) — the Foundation-free, `any`-free DNS/mDNS wire codec
-  (`DNSMessage` / `DNSName` / `DNSResourceRecord` / `IPv4Address` / `IPv6Address` / `DNSError`).
-  A SEPARATE import: `import MDNS` does NOT pull it in.
+## Invariants (must hold; tests guard them)
 
-## Module Structure
+- **The decoder rejects hostile input — it never traps and never silently
+  substitutes a default.** Malformed input throws `DNSError`; unrecognized
+  opcode / rcode / class / record-type values are preserved as `.unknown(...)`
+  rather than defaulted.
+- **DNS name decompression is bounded.** `DNSName.decode` caps compression-pointer
+  jumps (`maxJumps = 128`) and requires every pointer to point strictly backward
+  and within message bounds — a forward or self-referential pointer throws. This
+  defeats compression-pointer loops and the "infinite name" expansion attack.
+- **RFC 1035 total-name length (255 bytes) is enforced at decode time**,
+  incrementally as labels are appended — not only in `init(String)`. Compression
+  plus many short labels cannot build an over-long name past the cap.
+- **`DNSMessage.decode` enforces a hard size ceiling BEFORE reading any
+  attacker-controlled section count.** A datagram larger than `mdnsMaxMessageSize`
+  throws `DNSError.messageTooLarge` up front, so a tiny datagram cannot claim huge
+  section counts. Every speculative `reserveCapacity` is then capped to what the
+  remaining bytes could actually hold (`min(count, remainingBytes / minEntrySize)`)
+  — a DoS guard against forged 0xFFFF section counts. Do not reserve raw wire counts.
+- **Inbound decode failures are dropped per RFC 6762, never fatal, and are
+  observable.** A malformed multicast datagram is dropped without tearing down the
+  receive loop; `NIODNSTransport` counts it (`droppedDecodeFailureCount`) and emits
+  a throttled non-debug log at power-of-ten thresholds. Do not swallow the failure
+  silently and do not let it kill the loop.
+- **A facade-reaching `DNSWire` failure is wrapped as `MDNSError.codec(DNSError)`**
+  so a caller has one exhaustive `catch`. Keep `MDNSError` the single public error.
 
-```
-Sources/DNSWire/             # Tier-3 wire codec (Embedded-clean, no Foundation/NIO/any)
-├── DNSWire.swift            # Module documentation
-├── DNSConstants.swift       # Protocol constants (ports, addresses, record types)
-├── DNSError.swift           # Codec error type
-├── DNSName.swift            # DNS name encoding/decoding with compression
-├── DNSRecord.swift          # Resource records (A, AAAA, PTR, SRV, TXT, NSEC, ...)
-├── DNSMessage.swift         # Complete DNS message format
-├── MessageBuffer.swift      # `WriteBuffer` ([UInt8]-native) + byte ops
-└── UTF8Validation.swift     # Strict UTF-8 decode (rejects malformed input)
+## Embedded constraints (do not regress)
 
-Sources/MDNS/                # Tier-1 facade (host-only NIO adapter)
-├── CONTEXT.md               # This file
-├── MDNS.swift               # Module documentation
-├── MDNSBrowser.swift        # Actor: browse for services
-├── MDNSResponder.swift      # Actor: advertise services
-├── MDNSService.swift        # Service value type ([UInt8] TXT, IPAddress)
-├── MDNSDiscoveries.swift    # Typed `AsyncSequence<MDNSService, MDNSError>`
-├── MDNSError.swift          # The single public facade error
-├── TXTRecord.swift          # String-keyed TXT helper
-├── ServiceType.swift        # Common DNS-SD service type constants
-├── IPAddressBridge.swift    # DNSWire IPv4/IPv6 <-> P2PCore.IPAddress
-└── MDNSTransport.swift      # package: NIO transport seam + [UInt8]/ByteBuffer edge
-```
+- **`DNSWire` is the Embedded-clean target: no Foundation, no NIO, no `any`.** Its
+  `WriteBuffer` owns `ContiguousArray<UInt8>`; the decode workhorse uses
+  random-access `[UInt8]` indexing (compression pointers jump backward) rather than
+  a forward cursor, which stays Embedded-clean. The Embedded build is
+  `P2P_CORE_EMBEDDED=1 swiftly run +6.3.1 swift build --target DNSWire`.
+- **The `MDNS` facade is host-only** — it links NIO (`NIOUDPTransport`) for I/O and
+  `Mutex` for the transport's internal state. Keep all NIO / Foundation / `Mutex`
+  use inside the facade and its transport adapter; never push them down into
+  `DNSWire`.
 
-## Key Types
+## Dependencies & seams
 
-### Tier-3 wire codec (`import DNSWire`)
+- `MDNS` depends on `DNSWire` (codec), `NIOUDPTransport` (UDP + multicast join),
+  `P2PCoreTransport` (supplies the facade currency `IPAddress`), and `Logging`.
+- `NIODNSTransport` uses separate IPv4 / IPv6 `NIOUDPTransport` instances (each
+  address family needs its own socket bound to `0.0.0.0` / `::`) and joins the mDNS
+  multicast groups (224.0.0.251 / ff02::fb on port 5353).
+- `IPAddressBridge` is the only place `DNSWire`'s `IPv4Address` / `IPv6Address`
+  convert to / from `P2PCore.IPAddress`.
 
-| Type | Description |
-|------|-------------|
-| `DNSName` | DNS domain name with label encoding and compression pointer support |
-| `DNSQuestion` | DNS query with QU bit support for mDNS unicast responses |
-| `DNSResourceRecord` | Resource record with cache-flush bit support |
-| `DNSRecordData` | Typed RDATA (A, AAAA, PTR, SRV, TXT, HINFO, NSEC, unknown) |
-| `DNSMessage` | Complete DNS message with header and all sections (`encode() -> [UInt8]`, `decode(from: [UInt8])`) |
+## Wire protocol notes
 
-### Tier-1 facade (`import MDNS`)
+- mDNS: multicast 224.0.0.251 (IPv4) / ff02::fb (IPv6), UDP port 5353, message ID
+  always 0. Cache-flush bit = high bit of the class field; QU bit = high bit of the
+  question class (requests unicast); goodbye = TTL 0. (RFC 6762 / 6763 / 1035 / 2782.)
 
-| Type | Description |
-|------|-------------|
-| `MDNSService` | A discovered or advertised DNS-SD service (`addresses: [IPAddress]`, `txt: [String: [UInt8]]`) |
-| `MDNSBrowser` | Actor for browsing services; `browse(_:) -> some AsyncSequence<MDNSService, MDNSError>` |
-| `MDNSResponder` | Actor for advertising services; `advertise(_:)` / `withdraw(_:)` / `stop()` |
-| `MDNSError` | The single public facade error (`.codec(DNSError)` wraps wire failures) |
-| `TXTRecord` | String-keyed TXT helper (case-insensitive keys) |
+## Build
 
-## Usage Examples
-
-### Service Browsing
-
-```swift
-import MDNS
-
-let browser = MDNSBrowser()
-for try await service in try await browser.browse("_http._tcp.local.") {
-    print("Found: \(service.name) at \(service.host ?? "unknown"):\(service.port ?? 0)")
-}
-```
-
-### Service Advertising
-
-```swift
-import MDNS
-
-let responder = MDNSResponder()
-let service = MDNSService(
-    name: "My Web Server",
-    type: "_http._tcp",
-    port: 8080,
-    txt: ["path": Array("/api".utf8), "version": Array("1.0".utf8)]
-)
-try await responder.advertise(service)
-
-// Later, to withdraw:
-try await responder.withdraw(service)
-```
-
-### DNS Message Handling (Tier-3)
-
-```swift
-import DNSWire
-
-// Create a query
-let query = try DNSMessage.mdnsQuery(for: "_http._tcp.local.")
-let encoded: [UInt8] = query.encode()
-
-// Decode a response
-let message = try DNSMessage.decode(from: receivedBytes)
-for answer in message.answers {
-    switch answer.rdata {
-    case .ptr(let serviceName): print("  PTR -> \(serviceName)")
-    case .srv(let srv):         print("  SRV -> \(srv.target):\(srv.port)")
-    case .txt(let strings):     print("  TXT -> \(strings)")
-    case .a(let addr):          print("  A -> \(addr)")
-    case .aaaa(let addr):       print("  AAAA -> \(addr)")
-    default:                    break
-    }
-}
-```
-
-## DNS-SD Service Discovery Flow
-
-1. **PTR Query**: Query for `_service._protocol.local.` to get service instances
-2. **PTR Response**: Returns `ServiceName._service._protocol.local.`
-3. **SRV/TXT Query**: Query for the service instance name
-4. **SRV Response**: Returns hostname and port
-5. **TXT Response**: Returns service attributes
-6. **A/AAAA Query**: Query for the hostname
-7. **A/AAAA Response**: Returns IP addresses
-
-## mDNS Specifics
-
-- **Multicast Address**: 224.0.0.251 (IPv4) / ff02::fb (IPv6)
-- **Port**: 5353
-- **Message ID**: Always 0 for mDNS
-- **Cache-Flush Bit**: High bit of class field indicates cache flush
-- **QU Bit**: High bit of question class requests unicast response
-- **Goodbye**: TTL=0 indicates record withdrawal
-
-## Hardening (DNSWire)
-
-The wire decoder rejects hostile input rather than trapping or silently substituting:
-NSEC RDATA bounds, decode-time RFC 1035 name-length enforcement, strict UTF-8 in
-TXT/HINFO labels, compression-pointer loop/forward-reference detection, and
-preservation of unrecognized enum values as `.unknown(...)`.
-
-## References
-
-- [RFC 1035](https://tools.ietf.org/html/rfc1035) - Domain Names
-- [RFC 6762](https://tools.ietf.org/html/rfc6762) - Multicast DNS
-- [RFC 6763](https://tools.ietf.org/html/rfc6763) - DNS-Based Service Discovery
-- [RFC 2782](https://tools.ietf.org/html/rfc2782) - SRV records
-
-## Concurrency Model
-
-- `MDNSBrowser` and `MDNSResponder` are actors for safe concurrent access
-- `NIODNSTransport` uses `Mutex<T>` for thread-safe state management
-- All public types are `Sendable`
+- Host: `swift build` (Swift tools 6.2, platform floor macOS 26 — the facade
+  surfaces `P2PCore.IPAddress`).
+- Embedded codec: `P2P_CORE_EMBEDDED=1 swiftly run +6.3.1 swift build --target DNSWire`.
