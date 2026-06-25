@@ -36,6 +36,11 @@ dependencies: [
 ]
 ```
 
+> **Note:** The `MDNS` / `DNSWire` / `MDNSBrowser` / `MDNSResponder` API documented
+> here lives on the unreleased `embedded` branch (M8 pending). The released `1.2.0`
+> ships the prior API. Until the embedded API is tagged, depend on the branch:
+> `.package(url: "https://github.com/1amageek/swift-mDNS.git", branch: "embedded")`.
+
 Then add the product(s) you need to your target dependencies:
 
 ```swift
