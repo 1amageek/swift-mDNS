@@ -28,16 +28,21 @@ public enum MDNSError: Error, Equatable, Sendable {
     /// The underlying DNS wire codec rejected a message.
     case codec(DNSError)
 
+    #if !hasFeature(Embedded)
     /// Maps an arbitrary transport / codec error to an `MDNSError`.
     ///
     /// A `DNSError` becomes `.codec`; anything else becomes `.networkError` with
-    /// the supplied context. Performed in a non-typed-throws context so that
-    /// callers inside `throws(MDNSError)` functions need only a single bare
-    /// `catch` plus one `throw` of a precomputed value.
+    /// the supplied context. HOST-ONLY: the `any Error` parameter and the dynamic
+    /// `as?` cast are unavailable under Embedded Swift, so the host NIO transport
+    /// adapter uses this to fold NIO/socket errors onto the facade error type. The
+    /// Embedded path never needs it: every Embedded-visible throwing seam is
+    /// typed (`throws(DNSError)` for the codec, `throws(MDNSError)` for the
+    /// transport), so the facade converts with the typed initialisers below.
     static func mapping(_ error: any Error, context: String) -> MDNSError {
         if let dnsError = error as? DNSError {
             return .codec(dnsError)
         }
         return .networkError("\(context): \(error)")
     }
+    #endif
 }

@@ -1,76 +1,52 @@
-/// mDNS Transport
+/// mDNS Transport seam (Embedded-clean)
 ///
-/// Provides mDNS-specific transport functionality using NIOUDPTransport.
+/// The package-internal transport abstraction the facade drives. The contract is
+/// `[UInt8]`/`DNSMessage`-native and carries no NIO / Foundation / `any` in its
+/// surface, so it compiles under Embedded Swift. The host NIO multicast adapter
+/// (`NIODNSTransport`) and the Embedded POSIX adapter live in their own
+/// `#if`-gated files and conform to this protocol.
 
-import Foundation
-import NIOCore
-import NIOUDPTransport
-import Synchronization
+import _Concurrency   // REQUIRED under Embedded for AsyncStream/async
 import DNSWire
-
-// MARK: - Internal [UInt8] <-> ByteBuffer adapters (host-only NIO edge)
-
-extension DNSMessage {
-    /// Encodes the message to a NIO `ByteBuffer` for the multicast send path.
-    ///
-    /// One bulk copy at the NIO edge; `encode()` produces the `[UInt8]` payload.
-    @inline(__always)
-    func encodeToByteBuffer(allocator: ByteBufferAllocator) -> ByteBuffer {
-        let bytes = encode()
-        var buffer = allocator.buffer(capacity: bytes.count)
-        buffer.writeBytes(bytes)
-        return buffer
-    }
-
-    /// Decodes a message from an inbound NIO `ByteBuffer`.
-    ///
-    /// One bulk copy at the NIO edge into `[UInt8]`, then the Foundation-free
-    /// codec decodes it.
-    @inline(__always)
-    static func decode(fromBuffer buffer: ByteBuffer) throws(DNSError) -> DNSMessage {
-        var buffer = buffer
-        let bytes = buffer.readBytes(length: buffer.readableBytes) ?? []
-        return try decode(from: bytes)
-    }
-}
-
-#if DEBUG
-private let nioDNSTransportDebugLoggingEnabled =
-    ProcessInfo.processInfo.environment["NIO_DNS_TRANSPORT_DEBUG"] == "1"
-#else
-private let nioDNSTransportDebugLoggingEnabled = false
-#endif
-
-@inline(__always)
-private func nioDNSDebugLog(_ message: @autoclosure () -> String) {
-    guard nioDNSTransportDebugLoggingEnabled else { return }
-    print("[mDNS] \(message())")
-}
+import P2PCoreTransport
 
 /// Protocol for mDNS transport operations.
+///
+/// A driver (`MDNSBrowser` / `MDNSResponder`) sends `DNSMessage`s to the mDNS
+/// multicast groups and consumes inbound `DNSMessage`s through `messages`.
+/// Embedded-clean: `DNSMessage` is the Foundation-free codec type, the inbound
+/// stream is a concrete `AsyncStream`, there is no `any` in the contract, and the
+/// throwing requirements are TYPED (`throws(MDNSError)`). The typed throw is
+/// required under Embedded Swift: an untyped `throws` on an `async` requirement
+/// erases to `any Error` across the async boundary, which the Embedded compiler
+/// rejects. Each adapter maps its backend errors onto `MDNSError` at its edge.
 package protocol MDNSTransport: Sendable {
     /// Starts the transport (binds socket, joins multicast groups).
-    func start() async throws
+    func start() async throws(MDNSError)
 
     /// Stops the transport.
-    func shutdown() async throws
+    func shutdown() async throws(MDNSError)
 
     /// Sends a DNS message to the mDNS multicast groups.
-    func send(_ message: DNSMessage) async throws
+    func send(_ message: DNSMessage) async throws(MDNSError)
 
     /// Stream of received DNS messages with source address.
     var messages: AsyncStream<ReceivedDNSMessage> { get }
 }
 
-/// A received DNS message with its source address.
+/// A received DNS message with its source endpoint.
+///
+/// The source is the Foundation-free `SocketEndpoint` (not NIO's `SocketAddress`)
+/// so the type is Embedded-clean. It is `nil` when the backend could not resolve
+/// a source endpoint for the datagram; the facade keys only on `message`.
 package struct ReceivedDNSMessage: Sendable {
     /// The decoded DNS message.
     package let message: DNSMessage
 
-    /// The source address that sent this message.
-    package let source: SocketAddress
+    /// The source endpoint that sent this message, if the backend resolved one.
+    package let source: SocketEndpoint?
 
-    package init(message: DNSMessage, source: SocketAddress) {
+    package init(message: DNSMessage, source: SocketEndpoint? = nil) {
         self.message = message
         self.source = source
     }
@@ -98,312 +74,4 @@ package struct MDNSTransportConfiguration: Sendable {
     }
 
     package static let `default` = MDNSTransportConfiguration()
-}
-
-/// NIO-based mDNS transport implementation.
-///
-/// Uses separate `NIOUDPTransport` instances for IPv4 and IPv6 to properly
-/// handle multicast group membership. Each address family requires its own
-/// socket bound to the appropriate address (0.0.0.0 for IPv4, :: for IPv6).
-///
-/// ## Example
-/// ```swift
-/// let transport = NIODNSTransport(configuration: .default)
-/// try await transport.start()
-///
-/// // Receive messages
-/// Task {
-///     for await received in transport.messages {
-///         print("Received: \(received.message)")
-///     }
-/// }
-///
-/// // Send query
-/// let query = try DNSMessage.mdnsQuery(for: "_http._tcp.local.")
-/// try await transport.send(query)
-/// ```
-package final class NIODNSTransport: MDNSTransport, Sendable {
-
-    private let configuration: MDNSTransportConfiguration
-
-    // Separate transports for IPv4 and IPv6
-    private let ipv4Transport: NIOUDPTransport?
-    private let ipv6Transport: NIOUDPTransport?
-
-    private let allocator: ByteBufferAllocator
-
-    /// Stream of received DNS messages.
-    package let messages: AsyncStream<ReceivedDNSMessage>
-    private let messagesContinuation: AsyncStream<ReceivedDNSMessage>.Continuation
-
-    private struct State: Sendable {
-        var isStarted: Bool = false
-        var ipv4ReceiveTask: Task<Void, Never>?
-        var ipv6ReceiveTask: Task<Void, Never>?
-    }
-
-    private let state: Mutex<State>
-
-    /// Count of inbound datagrams that failed to decode and were dropped.
-    ///
-    /// Per RFC 6762, a malformed multicast datagram is dropped silently at the
-    /// protocol level. This counter provides observability so that persistent
-    /// malformed traffic (a misbehaving peer, an attack) can be detected even
-    /// when debug logging is disabled. A throttled, non-debug log is emitted as
-    /// the counter crosses power-of-ten thresholds.
-    private let decodeFailureCount: Mutex<UInt64>
-
-    /// The total number of inbound datagrams dropped due to decode failures.
-    package var droppedDecodeFailureCount: UInt64 {
-        decodeFailureCount.withLock { $0 }
-    }
-
-    /// Creates a new mDNS transport.
-    ///
-    /// - Parameter configuration: Transport configuration
-    package init(configuration: MDNSTransportConfiguration = .default) {
-        self.configuration = configuration
-        self.allocator = ByteBufferAllocator()
-
-        // Create IPv4 transport if enabled
-        if configuration.useIPv4 {
-            let ipv4Config = UDPConfiguration(
-                bindAddress: .ipv4Any(port: Int(mdnsPort)),
-                reuseAddress: true,
-                reusePort: true,
-                networkInterface: configuration.networkInterface,
-                streamBufferSize: 200
-            )
-            self.ipv4Transport = NIOUDPTransport(configuration: ipv4Config)
-        } else {
-            self.ipv4Transport = nil
-        }
-
-        // Create IPv6 transport if enabled
-        if configuration.useIPv6 {
-            let ipv6Config = UDPConfiguration(
-                bindAddress: .ipv6Any(port: Int(mdnsPort)),
-                reuseAddress: true,
-                reusePort: true,
-                networkInterface: configuration.networkInterface,
-                streamBufferSize: 200
-            )
-            self.ipv6Transport = NIOUDPTransport(configuration: ipv6Config)
-        } else {
-            self.ipv6Transport = nil
-        }
-
-        self.state = Mutex(State())
-        self.decodeFailureCount = Mutex(0)
-
-        // Create messages stream
-        var continuation: AsyncStream<ReceivedDNSMessage>.Continuation!
-        self.messages = AsyncStream { cont in
-            continuation = cont
-        }
-        self.messagesContinuation = continuation
-    }
-
-    /// Starts the transport.
-    ///
-    /// Binds to mDNS port 5353 and joins multicast groups.
-    package func start() async throws {
-        let alreadyStarted = state.withLock { state in
-            if state.isStarted { return true }
-            state.isStarted = true
-            return false
-        }
-
-        guard !alreadyStarted else { return }
-
-        // Start IPv4 transport and join multicast group
-        if let ipv4Transport = ipv4Transport {
-            nioDNSDebugLog("[NIODNSTransport] Starting IPv4 transport on port \(mdnsPort)...")
-            try await ipv4Transport.start()
-            let v4Addr = await ipv4Transport.localAddress
-            nioDNSDebugLog("[NIODNSTransport] IPv4 transport bound to \(v4Addr.map(String.init(describing:)) ?? "nil")")
-            try await ipv4Transport.joinMulticastGroup(
-                mdnsIPv4Address,
-                on: configuration.networkInterface
-            )
-            nioDNSDebugLog("[NIODNSTransport] IPv4 joined multicast group \(mdnsIPv4Address)")
-            startReceiving(from: ipv4Transport, isIPv4: true)
-        }
-
-        // Start IPv6 transport and join multicast group
-        if let ipv6Transport = ipv6Transport {
-            nioDNSDebugLog("[NIODNSTransport] Starting IPv6 transport on port \(mdnsPort)...")
-            try await ipv6Transport.start()
-            try await ipv6Transport.joinMulticastGroup(
-                mdnsIPv6Address,
-                on: configuration.networkInterface
-            )
-            nioDNSDebugLog("[NIODNSTransport] IPv6 joined multicast group \(mdnsIPv6Address)")
-            startReceiving(from: ipv6Transport, isIPv4: false)
-        }
-    }
-
-    /// Stops the transport.
-    package func shutdown() async throws {
-        let tasks = state.withLock { state -> (Task<Void, Never>?, Task<Void, Never>?) in
-            state.isStarted = false
-            let ipv4Task = state.ipv4ReceiveTask
-            let ipv6Task = state.ipv6ReceiveTask
-            state.ipv4ReceiveTask = nil
-            state.ipv6ReceiveTask = nil
-            return (ipv4Task, ipv6Task)
-        }
-
-        tasks.0?.cancel()
-        tasks.1?.cancel()
-
-        // Stop IPv4 transport
-        if let ipv4Transport = ipv4Transport {
-            try await ipv4Transport.shutdown()
-        }
-
-        // Stop IPv6 transport
-        if let ipv6Transport = ipv6Transport {
-            try await ipv6Transport.shutdown()
-        }
-
-        messagesContinuation.finish()
-    }
-
-    /// Sends a DNS message to the mDNS multicast groups.
-    ///
-    /// Sends to both IPv4 and IPv6 multicast groups. Succeeds if at least one
-    /// transport sends successfully. Only throws if all enabled transports fail.
-    package func send(_ message: DNSMessage) async throws {
-        // Encode directly to ByteBuffer (zero-copy path)
-        let buffer = message.encodeToByteBuffer(allocator: allocator)
-        var lastError: Error?
-        var sent = false
-
-        // Send to IPv4 multicast group
-        if let ipv4Transport = ipv4Transport {
-            nioDNSDebugLog("[NIODNSTransport] send: IPv4 → \(mdnsIPv4Address):\(mdnsPort), \(buffer.readableBytes) bytes")
-            do {
-                try await ipv4Transport.sendMulticast(
-                    buffer,
-                    to: mdnsIPv4Address,
-                    port: Int(mdnsPort)
-                )
-                sent = true
-                nioDNSDebugLog("[NIODNSTransport] send: IPv4 OK")
-            } catch {
-                lastError = error
-                nioDNSDebugLog("[NIODNSTransport] send: IPv4 FAILED: \(error)")
-            }
-        }
-
-        // Send to IPv6 multicast group
-        if let ipv6Transport = ipv6Transport {
-            nioDNSDebugLog("[NIODNSTransport] send: IPv6 → \(mdnsIPv6Address):\(mdnsPort), \(buffer.readableBytes) bytes")
-            do {
-                try await ipv6Transport.sendMulticast(
-                    buffer,
-                    to: mdnsIPv6Address,
-                    port: Int(mdnsPort)
-                )
-                sent = true
-                nioDNSDebugLog("[NIODNSTransport] send: IPv6 OK")
-            } catch {
-                lastError = error
-                nioDNSDebugLog("[NIODNSTransport] send: IPv6 FAILED: \(error)")
-            }
-        }
-
-        // Only throw if no transport succeeded
-        if !sent, let error = lastError {
-            throw error
-        }
-    }
-
-    /// Sends a DNS message to a specific address (for unicast responses).
-    ///
-    /// Uses zero-copy ByteBuffer encoding for optimal performance.
-    package func send(_ message: DNSMessage, to address: SocketAddress) async throws {
-        let buffer = message.encodeToByteBuffer(allocator: allocator)
-
-        // Determine which transport to use based on address family
-        switch address {
-        case .v4:
-            guard let ipv4Transport = ipv4Transport else {
-                throw DNSError.transportUnavailable("IPv4 transport not available")
-            }
-            try await ipv4Transport.send(buffer, to: address)
-        case .v6:
-            guard let ipv6Transport = ipv6Transport else {
-                throw DNSError.transportUnavailable("IPv6 transport not available")
-            }
-            try await ipv6Transport.send(buffer, to: address)
-        case .unixDomainSocket:
-            throw DNSError.transportUnavailable("Unix domain sockets not supported for mDNS")
-        }
-    }
-
-    // MARK: - Private
-
-    /// Records a dropped decode failure and emits a throttled, non-debug log.
-    ///
-    /// The log fires only when the running total crosses a power-of-ten threshold
-    /// (1, 10, 100, ...), so a flood of malformed datagrams cannot itself become a
-    /// log-spam denial of service while persistent problems remain visible.
-    private func recordDecodeFailure(isIPv4: Bool, error: Error) {
-        let total = decodeFailureCount.withLock { count -> UInt64 in
-            count += 1
-            return count
-        }
-
-        nioDNSDebugLog("mDNS decode error (\(isIPv4 ? "IPv4" : "IPv6")): \(error)")
-
-        if total.isPowerOfTen {
-            let family = isIPv4 ? "IPv4" : "IPv6"
-            print("[mDNS] Dropped \(total) malformed datagram(s); most recent on \(family): \(error)")
-        }
-    }
-
-    private func startReceiving(from transport: NIOUDPTransport, isIPv4: Bool) {
-        let task = Task { [weak self] in
-            guard let self = self else { return }
-
-            for await datagram in transport.incomingDatagrams {
-                // Decode DNS message directly from ByteBuffer (zero-copy)
-                do {
-                    let message = try DNSMessage.decode(fromBuffer: datagram.buffer)
-                    let received = ReceivedDNSMessage(
-                        message: message,
-                        source: datagram.remoteAddress
-                    )
-                    self.messagesContinuation.yield(received)
-                } catch {
-                    // Per RFC 6762, drop this malformed multicast datagram (do not
-                    // tear down the receive loop). Record it for observability so
-                    // persistent malformed traffic is detectable without debug logs.
-                    self.recordDecodeFailure(isIPv4: isIPv4, error: error)
-                }
-            }
-        }
-
-        state.withLock { state in
-            if isIPv4 {
-                state.ipv4ReceiveTask = task
-            } else {
-                state.ipv6ReceiveTask = task
-            }
-        }
-    }
-}
-
-private extension UInt64 {
-    /// Whether the value is a positive power of ten (1, 10, 100, ...).
-    var isPowerOfTen: Bool {
-        guard self > 0 else { return false }
-        var value = self
-        while value % 10 == 0 {
-            value /= 10
-        }
-        return value == 1
-    }
 }

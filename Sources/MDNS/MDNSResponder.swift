@@ -3,15 +3,20 @@
 /// Advertises DNS-SD services using mDNS. The public surface is `MDNSService` /
 /// `IPAddress`; NIO is used only internally for I/O.
 
+import _Concurrency   // REQUIRED under Embedded for AsyncStream/Task/CancellationError
 import DNSWire
-import NIOUDPTransport
 import P2PCoreTransport
+import P2PCoreCrypto
+#if !hasFeature(Embedded)
 import Logging
+#endif
 
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
 #endif
 
 /// Advertises DNS-SD services using mDNS.
@@ -44,9 +49,13 @@ public actor MDNSResponder {
         /// Number of announcement retries.
         public var announcementCount: Int
 
-        /// Logger for debug output.
+        #if !hasFeature(Embedded)
+        /// Logger for debug output. Host-only: `swift-log`'s `Logger` has no
+        /// Embedded analogue, so the Embedded facade has no logger.
         public var logger: Logger?
+        #endif
 
+        #if !hasFeature(Embedded)
         public init(
             ttl: UInt32 = mdnsDefaultTTL,
             useIPv4: Bool = true,
@@ -64,10 +73,35 @@ public actor MDNSResponder {
             self.announcementCount = announcementCount
             self.logger = logger
         }
+        #else
+        public init(
+            ttl: UInt32 = mdnsDefaultTTL,
+            useIPv4: Bool = true,
+            useIPv6: Bool = true,
+            networkInterface: String? = nil,
+            announcementInterval: Duration = .seconds(20),
+            announcementCount: Int = 3
+        ) {
+            self.ttl = ttl
+            self.useIPv4 = useIPv4
+            self.useIPv6 = useIPv6
+            self.networkInterface = networkInterface
+            self.announcementInterval = announcementInterval
+            self.announcementCount = announcementCount
+        }
+        #endif
     }
 
     private let configuration: Configuration
+    // The transport is held behind the `any` existential on host (so the
+    // package-internal injection seam can swap in a test fake) and behind the
+    // concrete default type under Embedded (where `any` is unavailable).
+    #if !hasFeature(Embedded)
     private let transport: any MDNSTransport
+    #else
+    private let transport: DefaultMDNSTransport
+    #endif
+    private let timer: MDNSDefaultTimer
 
     private var registeredServices: [String: MDNSService] = [:]
     private var hostAddresses: [IPAddress] = []
@@ -76,30 +110,39 @@ public actor MDNSResponder {
     private var receiveTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
 
-    private var logger: Logger? { configuration.logger }
+    #if !hasFeature(Embedded)
+    private var logger: MDNSLogger? { configuration.logger }
+    #else
+    private var logger: MDNSLogger? { nil }
+    #endif
 
     /// Creates a responder with the given configuration.
     ///
     /// - Parameter configuration: Responder configuration.
     public init(configuration: Configuration = .init()) {
         self.configuration = configuration
-        self.transport = NIODNSTransport(
+        self.transport = DefaultMDNSTransport(
             configuration: MDNSTransportConfiguration(
                 useIPv4: configuration.useIPv4,
                 useIPv6: configuration.useIPv6,
                 networkInterface: configuration.networkInterface
             )
         )
+        self.timer = MDNSDefaultTimer()
     }
 
+    #if !hasFeature(Embedded)
     /// Creates a responder with a custom transport (package-internal injection seam).
+    /// Host-only: the `any` existential parameter is unavailable under Embedded.
     package init(
         configuration: Configuration = .init(),
         transport: any MDNSTransport
     ) {
         self.configuration = configuration
         self.transport = transport
+        self.timer = MDNSDefaultTimer()
     }
+    #endif
 
     deinit {
         receiveTask?.cancel()
@@ -130,7 +173,8 @@ public actor MDNSResponder {
         do {
             _ = try makeAllRecords(for: serviceToRegister)
         } catch {
-            throw MDNSError.mapping(error, context: "Failed to build service records")
+            // `makeAllRecords` throws the typed codec error; wrap it as `.codec`.
+            throw MDNSError.codec(error)
         }
 
         registeredServices[serviceToRegister.fullName] = serviceToRegister
@@ -140,9 +184,20 @@ public actor MDNSResponder {
         logger?.info("Service advertised: \(serviceToRegister.name)")
 
         if refreshTask == nil {
+            // `weak`/`unowned` are forbidden under Embedded; the host build keeps
+            // the weak capture (so dropping the responder without `stop()` does not
+            // leak via the task→self→task cycle). Under Embedded the spawn is
+            // unreachable at runtime (the transport's `start()` throws in
+            // `ensureStarted()` above), so the strong capture never forms a live cycle.
+            #if !hasFeature(Embedded)
             refreshTask = Task { [weak self] in
                 await self?.runPeriodicRefresh()
             }
+            #else
+            refreshTask = Task { [self] in
+                await runPeriodicRefresh()
+            }
+            #endif
         }
     }
 
@@ -205,15 +260,26 @@ public actor MDNSResponder {
             try await transport.start()
         } catch {
             isStarted = false
-            throw MDNSError.mapping(error, context: "Responder transport start failed")
+            // The transport seam throws the facade error type directly; rethrow it.
+            throw error
         }
 
+        // See the capture-list note in `advertise(_:)`: weak on host, strong (and
+        // runtime-unreachable) under Embedded where `weak` is forbidden.
+        #if !hasFeature(Embedded)
         receiveTask = Task { [weak self] in
             guard let self else { return }
             for await received in self.transport.messages {
                 await self.processQuery(received.message)
             }
         }
+        #else
+        receiveTask = Task { [self] in
+            for await received in transport.messages {
+                await processQuery(received.message)
+            }
+        }
+        #endif
 
         logger?.info("MDNSResponder started")
     }
@@ -331,24 +397,23 @@ public actor MDNSResponder {
         do {
             records = try makeAllRecords(for: service)
         } catch {
-            throw MDNSError.mapping(error, context: "Failed to build announcement")
+            // `makeAllRecords` throws the typed codec error; wrap it as `.codec`.
+            throw MDNSError.codec(error)
         }
 
         let response = DNSMessage.response(id: 0, answers: records, isAuthoritative: true)
 
         for i in 0..<configuration.announcementCount {
-            do {
-                try await transport.send(response)
-            } catch {
-                throw MDNSError.mapping(error, context: "Failed to send announcement")
-            }
+            // The transport seam throws the facade error type directly.
+            try await transport.send(response)
 
             if i < configuration.announcementCount - 1 {
-                let delay = Duration.seconds(1 << i)
+                // Back off 1s, 2s, 4s, ... between announcements via the timer
+                // seam (no `Task.sleep`/`ContinuousClock`, so this is
+                // Embedded-clean). A cancelled wait stops announcing, not an error.
                 do {
-                    try await Task.sleep(for: delay)
+                    try await sleepSeconds(UInt64(1 << i))
                 } catch {
-                    // Task cancelled mid-announcement: stop announcing, not an error.
                     return
                 }
             }
@@ -356,9 +421,18 @@ public actor MDNSResponder {
     }
 
     private func sendGoodbye(for service: MDNSService) async {
+        // Build (typed codec error) then send (typed transport error) in separate
+        // typed do/catch blocks — no `any Error`, no `as` cast.
+        let goodbyeMessage: DNSMessage
         do {
             let records = try makeAllRecords(for: service)
-            let goodbyeMessage = DNSMessage.mdnsGoodbye(records: records)
+            goodbyeMessage = DNSMessage.mdnsGoodbye(records: records)
+        } catch {
+            logger?.debug("Failed to build goodbye: \(error)")
+            return
+        }
+
+        do {
             try await transport.send(goodbyeMessage)
         } catch {
             logger?.debug("Failed to send goodbye: \(error)")
@@ -446,11 +520,12 @@ public actor MDNSResponder {
 
     private func runPeriodicRefresh() async {
         while !Task.isCancelled && isStarted {
+            // Wait one announcement interval via the timer seam (no `Task.sleep`).
             do {
-                try await Task.sleep(for: configuration.announcementInterval)
+                try await sleep(configuration.announcementInterval)
             } catch {
                 if !Task.isCancelled {
-                    logger?.debug("Periodic refresh sleep error: \(error)")
+                    logger?.debug("Periodic refresh timer error: \(error)")
                 }
                 continue
             }
@@ -463,6 +538,20 @@ public actor MDNSResponder {
                 }
             }
         }
+    }
+
+    /// Suspends for `duration` via the injected `AsyncTimer` (no `Task.sleep`).
+    private func sleep(_ duration: Duration) async throws(CancellationError) {
+        let nanos = duration.facadeNanoseconds
+        let deadline = timer.monotonicNanos() &+ nanos
+        try await timer.sleep(untilNanos: deadline)
+    }
+
+    /// Suspends for `seconds` whole seconds via the injected `AsyncTimer`.
+    private func sleepSeconds(_ seconds: UInt64) async throws(CancellationError) {
+        let nanos = seconds &* 1_000_000_000
+        let deadline = timer.monotonicNanos() &+ nanos
+        try await timer.sleep(untilNanos: deadline)
     }
 
     /// Renders `[String: [UInt8]]` TXT attributes into DNS TXT wire strings.

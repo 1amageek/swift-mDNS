@@ -4,6 +4,8 @@
 /// `some AsyncSequence<MDNSService, MDNSError>` (typed throws) rather than an
 /// untyped `AsyncThrowingStream`, whose `Failure` is pinned to `any Error`.
 
+import _Concurrency   // REQUIRED under Embedded for AsyncSequence/AsyncStream
+
 /// A typed async sequence of discovered services.
 ///
 /// Iteration yields `MDNSService` values and throws `MDNSError`. A `.removed`
@@ -11,7 +13,14 @@
 /// the current state; consumers key on `MDNSService.id` to deduplicate.
 public struct MDNSDiscoveries: AsyncSequence, Sendable {
     public typealias Element = MDNSService
+    #if !hasFeature(Embedded)
+    // On host the typed `Failure` lets a consumer's `for try await … catch`
+    // surface a systemic browser error (swift-libp2p relies on this). Under
+    // Embedded, `AsyncIteratorProtocol` cannot carry a typed throw without erasing
+    // it to `any Error`, so the Embedded iterator is non-throwing and terminates
+    // on a failure (the same shape as `POSIXIncomingDatagrams`).
     public typealias Failure = MDNSError
+    #endif
 
     @usableFromInline
     let base: AsyncStream<Result<MDNSService, MDNSError>>
@@ -30,6 +39,7 @@ public struct MDNSDiscoveries: AsyncSequence, Sendable {
             self.inner = inner
         }
 
+        #if !hasFeature(Embedded)
         @inlinable
         public mutating func next() async throws(MDNSError) -> MDNSService? {
             guard let result = await inner.next() else { return nil }
@@ -40,6 +50,20 @@ public struct MDNSDiscoveries: AsyncSequence, Sendable {
                 throw error
             }
         }
+        #else
+        @inlinable
+        public mutating func next() async -> MDNSService? {
+            // Embedded: a failure terminates the sequence rather than throwing
+            // (typed throws cannot cross `AsyncIteratorProtocol` under Embedded).
+            guard let result = await inner.next() else { return nil }
+            switch result {
+            case .success(let service):
+                return service
+            case .failure:
+                return nil
+            }
+        }
+        #endif
     }
 
     @inlinable

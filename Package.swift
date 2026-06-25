@@ -16,6 +16,53 @@ let coreSettings: [SwiftSetting] = {
     return s
 }()
 
+// The Tier-1 `MDNS` facade's dependencies. `DNSWire` (the codec), `P2PCoreTransport`
+// (`IPAddress` / `SocketEndpoint`), and `P2PCoreCrypto` (the `AsyncTimer` time+sleep
+// seam) are present in BOTH builds — all three dual-build under `P2P_CORE_EMBEDDED`.
+// The host-only deps (swift-log for logging, swift-nio-udp for the NIO multicast
+// transport) are dropped under Embedded, where the source gates the matching imports
+// behind `#if !hasFeature(Embedded)` and uses the Embedded placeholder transport +
+// the no-op logger shim instead.
+// The package's external dependencies. `swift-p2p-core` (the `IPAddress` /
+// `SocketEndpoint` currency + the `AsyncTimer` seam) is needed in BOTH builds. The
+// host-only packages (swift-log, swift-nio-udp) are dropped under Embedded, where
+// the facade uses the no-op logger shim and the POSIX placeholder transport — this
+// keeps the Embedded module graph minimal and avoids an "unused dependency" warning.
+let packageDependencies: [Package.Dependency] = {
+    var d: [Package.Dependency] = [
+        // Provides the facade currency type `IPAddress` (Foundation-free, Embedded-clean).
+        .package(path: "../swift-p2p-core"),
+    ]
+    if !embeddedEnabled {
+        d += [
+            .package(url: "https://github.com/apple/swift-log.git", from: "1.8.0"),
+            // embedded-branch only; restore URL before release.
+            // Local path so the whole embedded composition (swift-libp2p pulls quic +
+            // SWIM + mDNS + nio-udp together) resolves nio-udp against ONE working tree.
+            // A URL pin here collides with swift-libp2p's local-path nio-udp and trips
+            // SwiftPM's "Conflicting identity for swift-nio-udp" diagnostic (escalating
+            // to an error in future SwiftPM). Original: .package(url: "https://github.com/1amageek/swift-nio-udp.git", from: "1.1.2")
+            .package(path: "../swift-nio-udp"),
+        ]
+    }
+    return d
+}()
+
+let mdnsFacadeDependencies: [Target.Dependency] = {
+    var d: [Target.Dependency] = [
+        "DNSWire",
+        .product(name: "P2PCoreTransport", package: "swift-p2p-core"),
+        .product(name: "P2PCoreCrypto", package: "swift-p2p-core"),
+    ]
+    if !embeddedEnabled {
+        d += [
+            .product(name: "Logging", package: "swift-log"),
+            .product(name: "NIOUDPTransport", package: "swift-nio-udp"),
+        ]
+    }
+    return d
+}()
+
 let package = Package(
     name: "swift-mDNS",
     platforms: [
@@ -43,18 +90,7 @@ let package = Package(
             targets: ["DNSWire"]
         ),
     ],
-    dependencies: [
-        .package(url: "https://github.com/apple/swift-log.git", from: "1.8.0"),
-        // embedded-branch only; restore URL before release.
-        // Local path so the whole embedded composition (swift-libp2p pulls quic +
-        // SWIM + mDNS + nio-udp together) resolves nio-udp against ONE working tree.
-        // A URL pin here collides with swift-libp2p's local-path nio-udp and trips
-        // SwiftPM's "Conflicting identity for swift-nio-udp" diagnostic (escalating
-        // to an error in future SwiftPM). Original: .package(url: "https://github.com/1amageek/swift-nio-udp.git", from: "1.1.2")
-        .package(path: "../swift-nio-udp"),
-        // Provides the facade currency type `IPAddress` (Foundation-free, Embedded-clean).
-        .package(path: "../swift-p2p-core"),
-    ],
+    dependencies: packageDependencies,
     targets: [
         // Tier-3: Embedded-clean DNS/mDNS wire codec (no Foundation, no NIO, no `any`).
         //
@@ -70,19 +106,23 @@ let package = Package(
             path: "Sources/DNSWire",
             swiftSettings: coreSettings
         ),
-        // Tier-1 facade: host-only NIO adapter. Browser / responder / transport over
-        // `[UInt8]` / `MDNSService` / `IPAddress`. Does I/O via NIO internally; the
-        // public surface carries no `Data` / `ByteBuffer` / NIO types.
+        // Tier-1 facade: dual-build (host + Embedded). Browser / responder /
+        // transport over `[UInt8]` / `MDNSService` / `IPAddress`. The public
+        // surface carries no `Data` / `ByteBuffer` / NIO / Foundation types.
+        //
+        // Host: I/O via NIO (`NIODNSTransport`), logging via swift-log, lock via
+        // `Synchronization.Mutex`, timers via `ContinuousClock`. Embedded: those
+        // host-only deps are dropped (the source gates them behind
+        // `#if !hasFeature(Embedded)`); the transport becomes the no-multicast
+        // `EmbeddedMDNSTransport` placeholder, the lock an `Atomic` spinlock, and
+        // timers the `clock_gettime`-backed `MDNSEmbeddedTimer`. The Embedded build
+        // is `P2P_CORE_EMBEDDED=1 swiftly run +6.3.1 swift build --target MDNS -c release`.
         .target(
             name: "MDNS",
-            dependencies: [
-                "DNSWire",
-                .product(name: "Logging", package: "swift-log"),
-                .product(name: "NIOUDPTransport", package: "swift-nio-udp"),
-                .product(name: "P2PCoreTransport", package: "swift-p2p-core"),
-            ],
+            dependencies: mdnsFacadeDependencies,
             path: "Sources/MDNS",
-            exclude: ["CONTEXT.md"]
+            exclude: ["CONTEXT.md"],
+            swiftSettings: coreSettings
         ),
         // Host test target: covers both the Tier-3 codec (`DNSWire`) and the
         // Tier-1 facade (`MDNS`).

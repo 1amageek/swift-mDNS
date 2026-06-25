@@ -11,9 +11,9 @@ private actor FakeMDNSTransport: MDNSTransport {
         continuation.finish()
     }
 
-    func start() async throws {}
-    func shutdown() async throws {}
-    func send(_ message: DNSMessage) async throws {}
+    func start() async throws(MDNSError) {}
+    func shutdown() async throws(MDNSError) {}
+    func send(_ message: DNSMessage) async throws(MDNSError) {}
 }
 
 @Suite("Error Handling - Malformed Message Detection")

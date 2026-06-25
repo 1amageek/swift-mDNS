@@ -3,10 +3,13 @@
 /// Browses for DNS-SD services using mDNS. The public surface is `[UInt8]` /
 /// `MDNSService` / `IPAddress`; NIO is used only internally for I/O.
 
+import _Concurrency   // REQUIRED under Embedded for AsyncStream/Task/CancellationError
 import DNSWire
-import NIOUDPTransport
 import P2PCoreTransport
+import P2PCoreCrypto
+#if !hasFeature(Embedded)
 import Logging
+#endif
 
 /// Browses for DNS-SD services using mDNS.
 ///
@@ -36,9 +39,13 @@ public actor MDNSBrowser {
         /// Network interface name (nil for all interfaces).
         public var networkInterface: String?
 
-        /// Logger for debug output.
+        #if !hasFeature(Embedded)
+        /// Logger for debug output. Host-only: `swift-log`'s `Logger` has no
+        /// Embedded analogue, so the Embedded facade has no logger.
         public var logger: Logger?
+        #endif
 
+        #if !hasFeature(Embedded)
         public init(
             queryInterval: Duration = .seconds(120),
             autoResolve: Bool = true,
@@ -54,10 +61,33 @@ public actor MDNSBrowser {
             self.networkInterface = networkInterface
             self.logger = logger
         }
+        #else
+        public init(
+            queryInterval: Duration = .seconds(120),
+            autoResolve: Bool = true,
+            useIPv4: Bool = true,
+            useIPv6: Bool = true,
+            networkInterface: String? = nil
+        ) {
+            self.queryInterval = queryInterval
+            self.autoResolve = autoResolve
+            self.useIPv4 = useIPv4
+            self.useIPv6 = useIPv6
+            self.networkInterface = networkInterface
+        }
+        #endif
     }
 
     private let configuration: Configuration
+    // The transport is held behind the `any` existential on host (so the
+    // package-internal injection seam can swap in a test fake) and behind the
+    // concrete default type under Embedded (where `any` is unavailable).
+    #if !hasFeature(Embedded)
     private let transport: any MDNSTransport
+    #else
+    private let transport: DefaultMDNSTransport
+    #endif
+    private let timer: MDNSDefaultTimer
 
     private var discoveryStream: AsyncStream<Result<MDNSService, MDNSError>>?
     private var discoveryContinuation: AsyncStream<Result<MDNSService, MDNSError>>.Continuation?
@@ -67,30 +97,39 @@ public actor MDNSBrowser {
     private var receiveTask: Task<Void, Never>?
     private var queryTask: Task<Void, Never>?
 
-    private var logger: Logger? { configuration.logger }
+    #if !hasFeature(Embedded)
+    private var logger: MDNSLogger? { configuration.logger }
+    #else
+    private var logger: MDNSLogger? { nil }
+    #endif
 
     /// Creates a browser with the given configuration.
     ///
     /// - Parameter configuration: Browser configuration.
     public init(configuration: Configuration = .init()) {
         self.configuration = configuration
-        self.transport = NIODNSTransport(
+        self.transport = DefaultMDNSTransport(
             configuration: MDNSTransportConfiguration(
                 useIPv4: configuration.useIPv4,
                 useIPv6: configuration.useIPv6,
                 networkInterface: configuration.networkInterface
             )
         )
+        self.timer = MDNSDefaultTimer()
     }
 
+    #if !hasFeature(Embedded)
     /// Creates a browser with a custom transport (package-internal injection seam).
+    /// Host-only: the `any` existential parameter is unavailable under Embedded.
     package init(
         configuration: Configuration = .init(),
         transport: any MDNSTransport
     ) {
         self.configuration = configuration
         self.transport = transport
+        self.timer = MDNSDefaultTimer()
     }
+    #endif
 
     deinit {
         receiveTask?.cancel()
@@ -114,9 +153,20 @@ public actor MDNSBrowser {
         try await sendQuery(for: serviceType)
 
         if queryTask == nil {
+            // `weak`/`unowned` are forbidden under Embedded; the host build keeps
+            // the weak capture (so dropping the browser without `stop()` does not
+            // leak via the task→self→task cycle). Under Embedded the spawn is
+            // unreachable at runtime (the transport's `start()` throws above before
+            // we get here), so the strong capture never forms a live cycle.
+            #if !hasFeature(Embedded)
             queryTask = Task { [weak self] in
                 await self?.runPeriodicQueries()
             }
+            #else
+            queryTask = Task { [self] in
+                await runPeriodicQueries()
+            }
+            #endif
         }
 
         logger?.debug("Started browsing for \(serviceType)")
@@ -175,15 +225,26 @@ public actor MDNSBrowser {
             try await transport.start()
         } catch {
             isStarted = false
-            throw MDNSError.mapping(error, context: "Browser transport start failed")
+            // The transport seam throws the facade error type directly; rethrow it.
+            throw error
         }
 
+        // See the capture-list note in `browse(_:)`: weak on host, strong (and
+        // runtime-unreachable) under Embedded where `weak` is forbidden.
+        #if !hasFeature(Embedded)
         receiveTask = Task { [weak self] in
             guard let self else { return }
             for await received in self.transport.messages {
                 await self.processMessage(received.message)
             }
         }
+        #else
+        receiveTask = Task { [self] in
+            for await received in transport.messages {
+                await processMessage(received.message)
+            }
+        }
+        #endif
 
         logger?.info("MDNSBrowser started")
     }
@@ -249,31 +310,47 @@ public actor MDNSBrowser {
             logger?.debug("Service found: \(instanceName)")
 
             if configuration.autoResolve {
+                // See the capture-list note in `browse(_:)`.
+                #if !hasFeature(Embedded)
                 Task { [weak self] in
                     guard let self else { return }
                     await self.resolve(fullName: service.fullName)
                 }
+                #else
+                Task { [self] in
+                    await resolve(fullName: service.fullName)
+                }
+                #endif
             }
         }
     }
 
     private func resolve(fullName: String) async {
         guard isStarted else { return }
+
+        // Build the query (typed codec error) and send it (typed transport error)
+        // in separate typed do/catch blocks. Keeping each `catch` bound to one
+        // typed error avoids both `any Error` and `catch ... as <Error>` — the
+        // latter crashes SILGen in async throwing contexts (project rule).
+        let message: DNSMessage
         do {
             let name = try DNSName(fullName)
-            let message = DNSMessage.mdnsQuery(
+            message = DNSMessage.mdnsQuery(
                 name: name,
                 types: [.srv, .txt],
                 unicastResponse: true
             )
-            try await transport.send(message)
-        } catch let error as DNSError {
+        } catch {
             discoveryContinuation?.yield(.failure(.codec(error)))
             logger?.debug("Auto-resolve failed for \(fullName): \(error)")
+            return
+        }
+
+        do {
+            try await transport.send(message)
         } catch {
-            discoveryContinuation?.yield(
-                .failure(.networkError("Auto-resolve failed for \(fullName): \(error)"))
-            )
+            discoveryContinuation?.yield(.failure(error))
+            logger?.debug("Auto-resolve send failed for \(fullName): \(error)")
         }
     }
 
@@ -333,27 +410,45 @@ public actor MDNSBrowser {
     }
 
     private func sendQuery(for serviceType: String) async throws(MDNSError) {
+        // Encode (typed codec error) then send (typed transport error) in
+        // separate typed do/catch blocks — no `any Error`, no `as` cast.
+        let message: DNSMessage
         do {
-            let message = try DNSMessage.mdnsQuery(for: serviceType)
-            try await transport.send(message)
+            message = try DNSMessage.mdnsQuery(for: serviceType)
         } catch {
-            throw MDNSError.mapping(error, context: "Failed to send query for \(serviceType)")
+            throw MDNSError.codec(error)
         }
+        try await transport.send(message)
     }
 
     private func runPeriodicQueries() async {
         while !Task.isCancelled && isStarted {
+            // Wait one query interval via the timer seam (no `Task.sleep`).
             do {
-                try await Task.sleep(for: configuration.queryInterval)
-                for serviceType in browsingTypes {
-                    try await sendQuery(for: serviceType)
-                }
+                try await sleep(configuration.queryInterval)
             } catch {
+                // Cancelled wait: stop the loop (the guard above also catches it).
                 if !Task.isCancelled {
+                    logger?.debug("Periodic query timer error: \(error)")
+                }
+                continue
+            }
+
+            for serviceType in browsingTypes {
+                do {
+                    try await sendQuery(for: serviceType)
+                } catch {
                     logger?.debug("Periodic query error: \(error)")
                 }
             }
         }
+    }
+
+    /// Suspends for `duration` via the injected `AsyncTimer` (no `Task.sleep`).
+    private func sleep(_ duration: Duration) async throws(CancellationError) {
+        let nanos = duration.facadeNanoseconds
+        let deadline = timer.monotonicNanos() &+ nanos
+        try await timer.sleep(untilNanos: deadline)
     }
 
     /// Parses DNS TXT strings ("key=value" / "key") into `[String: [UInt8]]`.
