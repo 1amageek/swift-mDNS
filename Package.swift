@@ -40,12 +40,12 @@ let packageDependencies: [Package.Dependency] = {
         // own Embedded build under `P2P_CORE_EMBEDDED=1`, so the whole Embedded
         // module graph stays Embedded-consistent (no non-Embedded import).
         d += [
-            .package(url: "https://github.com/1amageek/swift-p2p-transport.git", from: "0.1.0"),
+            .package(url: "https://github.com/1amageek/swift-p2p-transport.git", from: "0.1.1"),
         ]
     } else {
         d += [
             .package(url: "https://github.com/apple/swift-log.git", from: "1.8.0"),
-            .package(url: "https://github.com/1amageek/swift-nio-udp.git", from: "1.1.2"),
+            .package(url: "https://github.com/1amageek/swift-nio-udp.git", from: "1.1.3"),
         ]
     }
     return d
