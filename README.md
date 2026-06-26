@@ -190,9 +190,11 @@ a throttled log, so persistent malformed traffic stays detectable.
 
 ## Performance
 
-The `DNSWire` codec is optimized for throughput with minimal allocations: zero-copy
-parsing from raw buffers, inline (stack-allocated) IPv4/IPv6 storage, DNS name
-compression, a `ContiguousArray`-backed write buffer, and `~Copyable` buffers.
+The `DNSWire` codec is optimized for throughput with minimal allocations:
+index-based parsing over raw byte arrays, inline (stack-allocated) IPv4/IPv6
+storage, DNS name compression, a `ContiguousArray`-backed write buffer, and
+`~Copyable` buffers. The host NIO adapter performs one bulk copy at the
+`[UInt8]` / `ByteBuffer` boundary.
 
 Measured on Apple Silicon (M-series):
 

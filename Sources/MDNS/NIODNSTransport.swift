@@ -283,7 +283,7 @@ package final class NIODNSTransport: MDNSTransport, Sendable {
     /// Sends to both IPv4 and IPv6 multicast groups. Succeeds if at least one
     /// transport sends successfully. Only throws if all enabled transports fail.
     package func send(_ message: DNSMessage) async throws(MDNSError) {
-        // Encode directly to ByteBuffer (zero-copy path)
+        // Encode to ByteBuffer with one bulk copy at the NIO edge.
         let buffer = message.encodeToByteBuffer(allocator: allocator)
         var lastError: Error?
         var sent = false
@@ -330,7 +330,7 @@ package final class NIODNSTransport: MDNSTransport, Sendable {
 
     /// Sends a DNS message to a specific address (for unicast responses).
     ///
-    /// Uses zero-copy ByteBuffer encoding for optimal performance.
+    /// Uses ByteBuffer encoding with one bulk copy at the NIO edge.
     package func send(_ message: DNSMessage, to address: SocketAddress) async throws {
         let buffer = message.encodeToByteBuffer(allocator: allocator)
 
@@ -377,7 +377,7 @@ package final class NIODNSTransport: MDNSTransport, Sendable {
             guard let self = self else { return }
 
             for await datagram in transport.incomingDatagrams {
-                // Decode DNS message directly from ByteBuffer (zero-copy)
+                // Decode from ByteBuffer through the host-only NIO edge adapter.
                 do {
                     let message = try DNSMessage.decode(fromBuffer: datagram.buffer)
                     let received = ReceivedDNSMessage(

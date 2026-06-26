@@ -183,11 +183,19 @@ package final class EmbeddedMDNSTransport: MDNSTransport, Sendable {
         // the kernel level anyway. Close terminates the `incoming` AsyncSequence so
         // the receive loops finish.
         if let ipv4Transport {
-            try? await ipv4Transport.leaveGroup(Self.ipv4Group)
+            do {
+                try await ipv4Transport.leaveGroup(Self.ipv4Group)
+            } catch {
+                // Best effort: closing the socket drops membership at the kernel level.
+            }
             await ipv4Transport.close()
         }
         if let ipv6Transport {
-            try? await ipv6Transport.leaveGroup(Self.ipv6Group)
+            do {
+                try await ipv6Transport.leaveGroup(Self.ipv6Group)
+            } catch {
+                // Best effort: closing the socket drops membership at the kernel level.
+            }
             await ipv6Transport.close()
         }
 
