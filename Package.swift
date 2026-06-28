@@ -28,7 +28,7 @@ let coreSettings: [SwiftSetting] = {
 let packageDependencies: [Package.Dependency] = {
     var d: [Package.Dependency] = [
         // Provides the facade currency type `IPAddress` (Foundation-free, Embedded-clean).
-        .package(url: "https://github.com/1amageek/swift-p2p-core.git", from: "0.2.0"),
+        .package(url: "https://github.com/1amageek/swift-p2p-core.git", from: "0.2.1"),
     ]
     if embeddedEnabled {
         // The Embedded mDNS transport drives the Embedded-clean POSIX multicast
@@ -37,12 +37,12 @@ let packageDependencies: [Package.Dependency] = {
         // own Embedded build under `P2P_CORE_EMBEDDED=1`, so the whole Embedded
         // module graph stays Embedded-consistent (no non-Embedded import).
         d += [
-            .package(url: "https://github.com/1amageek/swift-p2p-transport.git", from: "0.2.0"),
+            .package(url: "https://github.com/1amageek/swift-p2p-transport.git", from: "0.2.1"),
         ]
     } else {
         d += [
             .package(url: "https://github.com/apple/swift-log.git", from: "1.8.0"),
-            .package(url: "https://github.com/1amageek/swift-nio-udp.git", from: "1.1.3"),
+            .package(url: "https://github.com/1amageek/swift-nio-udp.git", from: "1.1.4"),
         ]
     }
     return d
