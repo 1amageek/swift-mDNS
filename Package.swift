@@ -28,7 +28,7 @@ let coreSettings: [SwiftSetting] = {
 let packageDependencies: [Package.Dependency] = {
     var d: [Package.Dependency] = [
         // Provides the facade currency type `IPAddress` (Foundation-free, Embedded-clean).
-        .package(path: "../swift-p2p-core"),
+        .package(url: "https://github.com/1amageek/swift-p2p-core.git", from: "0.2.0"),
     ]
     if embeddedEnabled {
         // The Embedded mDNS transport drives the Embedded-clean POSIX multicast
@@ -37,7 +37,7 @@ let packageDependencies: [Package.Dependency] = {
         // own Embedded build under `P2P_CORE_EMBEDDED=1`, so the whole Embedded
         // module graph stays Embedded-consistent (no non-Embedded import).
         d += [
-            .package(path: "../swift-p2p-transport"),
+            .package(url: "https://github.com/1amageek/swift-p2p-transport.git", from: "0.2.0"),
         ]
     } else {
         d += [

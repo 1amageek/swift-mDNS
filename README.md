@@ -5,9 +5,7 @@ Discovery (DNS-SD, RFC 6763). Embedded-first: the wire codec is Foundation-free 
 the byte currency is `[UInt8]` / `MDNSService` / `P2PCore.IPAddress`; no `Data` /
 `ByteBuffer` / NIO type appears on the public surface.
 
-> **Release status.** The released `1.2.0` ships the prior API. The Embedded-first
-> API documented here lives on the unreleased `embedded` branch (M8 pending) and is
-> not tagged — pin to the branch to use it.
+> **Release status.** Current release: `1.3.0`.
 
 ## Features
 
@@ -31,12 +29,11 @@ the byte currency is `[UInt8]` / `MDNSService` / `P2PCore.IPAddress`; no `Data` 
 
 ## Installation
 
-Add swift-mDNS to your `Package.swift`. While the Embedded API is on the unreleased
-`embedded` branch, depend on the branch:
+Add swift-mDNS to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-mDNS.git", branch: "embedded")
+    .package(url: "https://github.com/1amageek/swift-mDNS.git", from: "1.3.0")
 ]
 ```
 
