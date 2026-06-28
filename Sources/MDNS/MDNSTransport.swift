@@ -3,8 +3,8 @@
 /// The package-internal transport abstraction the facade drives. The contract is
 /// `[UInt8]`/`DNSMessage`-native and carries no NIO / Foundation / `any` in its
 /// surface, so it compiles under Embedded Swift. The host NIO multicast adapter
-/// (`NIODNSTransport`) and the Embedded POSIX adapter live in their own
-/// `#if`-gated files and conform to this protocol.
+/// (`NIODNSTransport`), Embedded POSIX adapter, and WASI unavailable adapter live
+/// in their own `#if`-gated files and conform to this protocol.
 
 import _Concurrency   // REQUIRED under Embedded for AsyncStream/async
 import DNSWire
@@ -15,8 +15,8 @@ import P2PCoreTransport
 /// A driver (`MDNSBrowser` / `MDNSResponder`) sends `DNSMessage`s to the mDNS
 /// multicast groups and consumes inbound `DNSMessage`s through `messages`.
 /// Embedded-clean: `DNSMessage` is the Foundation-free codec type, the inbound
-/// stream is a concrete `AsyncStream`, there is no `any` in the contract, and the
-/// throwing requirements are TYPED (`throws(MDNSError)`). The typed throw is
+/// stream is a concrete `AsyncStream`, there is no NIO/Foundation in the contract,
+/// and the throwing requirements are TYPED (`throws(MDNSError)`). The typed throw is
 /// required under Embedded Swift: an untyped `throws` on an `async` requirement
 /// erases to `any Error` across the async boundary, which the Embedded compiler
 /// rejects. Each adapter maps its backend errors onto `MDNSError` at its edge.

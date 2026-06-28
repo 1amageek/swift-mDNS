@@ -6,13 +6,20 @@
 /// package-internal injection seam can swap in a test fake) and behind this
 /// concrete type under Embedded (where `any` is unavailable).
 ///
-///   host  (default):   DefaultMDNSTransport = NIODNSTransport     (NIO multicast)
-///   Embedded (-c rel): DefaultMDNSTransport = EmbeddedMDNSTransport (placeholder)
+///   host  (NIO present): DefaultMDNSTransport = NIODNSTransport        (NIO multicast)
+///   WASI / no host I/O:  DefaultMDNSTransport = UnavailableMDNSTransport
+///   Embedded POSIX:      DefaultMDNSTransport = EmbeddedMDNSTransport  (raw POSIX multicast)
 
-#if !hasFeature(Embedded)
+#if canImport(WASILibc)
+/// The default transport where WASI exposes no UDP multicast socket backend.
+typealias DefaultMDNSTransport = UnavailableMDNSTransport
+#elseif hasFeature(Embedded)
+/// The Embedded default transport: the raw-POSIX multicast adapter.
+typealias DefaultMDNSTransport = EmbeddedMDNSTransport
+#elseif canImport(NIOUDPTransport)
 /// The host default transport: the NIO multicast adapter.
 typealias DefaultMDNSTransport = NIODNSTransport
 #else
-/// The Embedded default transport: the multicast-less placeholder adapter.
-typealias DefaultMDNSTransport = EmbeddedMDNSTransport
+/// The default transport where no host multicast socket backend is available.
+typealias DefaultMDNSTransport = UnavailableMDNSTransport
 #endif

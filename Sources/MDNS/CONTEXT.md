@@ -1,8 +1,8 @@
 # MDNS — CONTEXT
 Scope/role: the `MDNS` Tier-1 facade (browser / responder) plus its package-internal
-NIO transport seam; built on the Embedded-clean `DNSWire` codec. Depended on by
+transport seam; built on the Embedded-clean `DNSWire` codec. Depended on by
 peer-discovery callers (libp2p) that want service browse / advertise over mDNS.
-Last reviewed: 2026-06-25
+Last reviewed: 2026-06-28
 
 Invariants and design intent that the source does not state structurally. Read this
 before changing the facade (`Sources/MDNS`) or the wire codec (`Sources/DNSWire`).
@@ -14,11 +14,11 @@ the contract.
 
 ## Contracts (the load-bearing rules)
 
-- **`DNSWire` is the codec; `MDNS` is the host facade — keep the split.** `import
+- **`DNSWire` is the codec; `MDNS` is the facade — keep the split.** `import
   MDNS` does NOT pull in `DNSWire`; a caller building records by hand imports
   `DNSWire` deliberately. `DNSWire` carries no `swift-p2p-core` dependency, which
-  keeps it off the macOS-26 `Span` floor and lets it compile under Embedded Swift.
-  Do not introduce a `DNSWire -> P2PCore` (or `DNSWire -> NIO`) edge.
+  keeps it off the macOS-26 `Span` floor and lets it compile under Embedded Swift
+  and WASI. Do not introduce a `DNSWire -> P2PCore` (or `DNSWire -> NIO`) edge.
 - **`MDNSTransport` is a `package` protocol, not public.** It is the injection seam
   used by tests and the `NIODNSTransport` adapter. `NIODNSTransport` is the single
   place where `[UInt8]` crosses to / from a NIO `ByteBuffer` (one bulk copy at the
@@ -67,22 +67,29 @@ the contract.
 - **A facade-reaching `DNSWire` failure is wrapped as `MDNSError.codec(DNSError)`**
   so a caller has one exhaustive `catch`. Keep `MDNSError` the single public error.
 
-## Embedded constraints (do not regress)
+## Embedded / WASM constraints (do not regress)
 
 - **`DNSWire` is the Embedded-clean target: no Foundation, no NIO, no `any`.** Its
   `WriteBuffer` owns `ContiguousArray<UInt8>`; the decode workhorse uses
   random-access `[UInt8]` indexing (compression pointers jump backward) rather than
   a forward cursor, which stays Embedded-clean. The Embedded build is
   `P2P_CORE_EMBEDDED=1 swiftly run +6.3.1 swift build --target DNSWire`.
-- **The `MDNS` facade is host-only** — it links NIO (`NIOUDPTransport`) for I/O and
-  `Mutex` for the transport's internal state. Keep all NIO / Foundation / `Mutex`
-  use inside the facade and its transport adapter; never push them down into
-  `DNSWire`.
+- **The `MDNS` facade must compile for host, Embedded, and WASI.** Host I/O is
+  `NIODNSTransport`, Embedded I/O is `EmbeddedMDNSTransport`, and WASI is
+  `UnavailableMDNSTransport` because WASI exposes no UDP multicast socket. Keep
+  NIO / Foundation / host socket types inside host-only files and never push them
+  down into `DNSWire`.
+- **WASI must win over Embedded in backend selection.** If a future toolchain can
+  combine Embedded and WASI, the default transport still remains
+  `UnavailableMDNSTransport`; raw POSIX multicast is only for Embedded POSIX-like
+  targets.
 
 ## Dependencies & seams
 
-- `MDNS` depends on `DNSWire` (codec), `NIOUDPTransport` (UDP + multicast join),
-  `P2PCoreTransport` (supplies the facade currency `IPAddress`), and `Logging`.
+- `MDNS` always depends on `DNSWire` (codec), `P2PCoreTransport` (facade currency
+  `IPAddress`), and `P2PCoreCrypto` (timer seam). Host builds conditionally depend
+  on `NIOUDPTransport` (UDP + multicast join) and `Logging`; WASI must not compile
+  either product into the target.
 - `NIODNSTransport` uses separate IPv4 / IPv6 `NIOUDPTransport` instances (each
   address family needs its own socket bound to `0.0.0.0` / `::`) and joins the mDNS
   multicast groups (224.0.0.251 / ff02::fb on port 5353).
@@ -100,3 +107,4 @@ the contract.
 - Host: `swift build` (Swift tools 6.2, platform floor macOS 26 — the facade
   surfaces `P2PCore.IPAddress`).
 - Embedded codec: `P2P_CORE_EMBEDDED=1 swiftly run +6.3.1 swift build --target DNSWire`.
+- WASM: `./scripts/verify-wasm.sh`.

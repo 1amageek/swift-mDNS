@@ -1,14 +1,17 @@
 /// Host-only NIO mDNS multicast transport.
 ///
 /// The host adapter that satisfies the Embedded-clean `MDNSTransport` seam using
-/// `NIOUDPTransport` for real multicast I/O. The whole file is excluded from the
-/// Embedded build (`#if !hasFeature(Embedded)`): NIO, `Foundation`, and
-/// `Synchronization.Mutex` are host-only. The Embedded build supplies its own
-/// `MDNSTransport` adapter (`EmbeddedMDNSTransport`).
+/// `NIOUDPTransport` for real multicast I/O. The whole file is excluded from
+/// Embedded and WASI builds: NIO and host socket constants belong only in this
+/// host adapter. Embedded and WASI supply their own `MDNSTransport` adapters.
 
-#if !hasFeature(Embedded)
+#if !hasFeature(Embedded) && canImport(NIOUDPTransport)
 
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 import NIOCore
 import NIOUDPTransport
 import Synchronization
@@ -239,10 +242,9 @@ package final class NIODNSTransport: MDNSTransport, Sendable {
                 startReceiving(from: ipv6Transport, isIPv4: false)
             }
         } catch {
-            // Roll back the started flag so a retry can re-attempt the bind, then
-            // surface the NIO/socket failure mapped onto the facade error type.
-            state.withLock { $0.isStarted = false }
-            throw MDNSError.mapping(error, context: "NIODNSTransport start failed")
+            let mapped = MDNSError.mapping(error, context: "NIODNSTransport start failed")
+            await rollbackStartFailure()
+            throw mapped
         }
     }
 
@@ -352,6 +354,35 @@ package final class NIODNSTransport: MDNSTransport, Sendable {
     }
 
     // MARK: - Private
+
+    private func rollbackStartFailure() async {
+        let tasks = state.withLock { state -> (Task<Void, Never>?, Task<Void, Never>?) in
+            state.isStarted = false
+            let ipv4Task = state.ipv4ReceiveTask
+            let ipv6Task = state.ipv6ReceiveTask
+            state.ipv4ReceiveTask = nil
+            state.ipv6ReceiveTask = nil
+            return (ipv4Task, ipv6Task)
+        }
+
+        tasks.0?.cancel()
+        tasks.1?.cancel()
+
+        if let ipv4Transport {
+            do {
+                try await ipv4Transport.shutdown()
+            } catch {
+                nioDNSDebugLog("IPv4 rollback shutdown failed: \(error)")
+            }
+        }
+        if let ipv6Transport {
+            do {
+                try await ipv6Transport.shutdown()
+            } catch {
+                nioDNSDebugLog("IPv6 rollback shutdown failed: \(error)")
+            }
+        }
+    }
 
     /// Records a dropped decode failure and emits a throttled, non-debug log.
     ///

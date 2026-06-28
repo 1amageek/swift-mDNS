@@ -14,6 +14,8 @@ the byte currency is `[UInt8]` / `MDNSService` / `P2PCore.IPAddress`; no `Data` 
 - **Pure Swift** — no C dependencies; the `DNSWire` codec works on all Swift platforms.
 - **RFC compliant** — RFC 1035 (DNS), RFC 6762 (mDNS), RFC 6763 (DNS-SD), RFC 2782 (SRV).
 - **Embedded-first** — `[UInt8]` byte currency; the `DNSWire` codec has no Foundation / NIO / `any`.
+- **WASM-aware** — `DNSWire` and the `MDNS` facade compile for WASI; default
+  multicast I/O is unavailable there because WASI exposes no UDP multicast socket.
 - **Modern concurrency** — actors and `Sendable` types; typed-throws discovery stream.
 - **Hardened parsing** — wire decoding strictly bounds-checks hostile input and throws
   `DNSError` on malformed data instead of trapping; compression-pointer jumps are
@@ -125,11 +127,12 @@ Three layers, top to bottom:
 │  MDNSService (value), MDNSError, MDNSDiscoveries            │
 │  Currency: [UInt8] / MDNSService / P2PCore.IPAddress        │
 ├─────────────────────────────────────────────────────────────┤
-│  MDNSTransport (package protocol) + NIODNSTransport         │
+│  MDNSTransport (package protocol)                           │
 │  - mDNS-specific abstraction over UDP                       │
 │  - the only place [UInt8] <-> ByteBuffer crosses the edge   │
-│  - joins mDNS multicast groups (224.0.0.251, ff02::fb)      │
-│  - built on NIOUDPTransport from swift-nio-udp              │
+│  - host: NIODNSTransport joins multicast groups             │
+│  - Embedded: EmbeddedMDNSTransport uses raw POSIX multicast │
+│  - WASI: UnavailableMDNSTransport fails loudly              │
 ├─────────────────────────────────────────────────────────────┤
 │  Tier-3 codec  (import DNSWire)                             │
 │  DNSMessage, DNSName, DNSResourceRecord, DNSRecordData,     │
@@ -151,14 +154,16 @@ Three layers, top to bottom:
 - **`MDNSResponder`** answers queries for registered services and announces with
   backoff; `withdraw(_:)` / `stop()` send goodbye messages (TTL == 0).
 - **`MDNSTransport`** is a `package` protocol (the test / adapter injection seam);
-  `NIODNSTransport` is the production implementation, the single place where
-  `[UInt8]` crosses to / from a NIO `ByteBuffer`.
+  `NIODNSTransport` is the host production implementation, the single place where
+  `[UInt8]` crosses to / from a NIO `ByteBuffer`. WASI uses
+  `UnavailableMDNSTransport` so the facade compiles without NIO or host socket
+  APIs; calling `browse` / `advertise` fails with `MDNSError.transportUnavailable`.
 
 `DNSWire` carries no `swift-p2p-core` dependency, which keeps it off the macOS-26
 `Span` platform requirement of P2PCore and lets `swift build --target DNSWire`
-compile under Embedded Swift. The package's single platform set still adopts the
-shared Embedded-first baseline (macOS 26) because the `MDNS` facade surfaces
-`P2PCore.IPAddress`. See `Sources/MDNS/CONTEXT.md` for the load-bearing invariants.
+compile under Embedded Swift and WASI. The package's single platform set still
+adopts the shared Embedded-first baseline (macOS 26) because the `MDNS` facade
+surfaces `P2PCore.IPAddress`. See `Sources/MDNS/CONTEXT.md` for the load-bearing invariants.
 
 ## Security
 
@@ -222,6 +227,12 @@ facade (`MDNS`). Run with a timeout to guard against hangs:
 
 ```bash
 swift test
+```
+
+Compile the WASM regression gate with:
+
+```bash
+./scripts/verify-wasm.sh
 ```
 
 ## References

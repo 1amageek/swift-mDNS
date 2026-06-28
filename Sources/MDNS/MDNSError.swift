@@ -28,7 +28,7 @@ public enum MDNSError: Error, Equatable, Sendable {
     /// The underlying DNS wire codec rejected a message.
     case codec(DNSError)
 
-    #if !hasFeature(Embedded)
+    #if !hasFeature(Embedded) && !canImport(WASILibc)
     /// Maps an arbitrary transport / codec error to an `MDNSError`.
     ///
     /// A `DNSError` becomes `.codec`; anything else becomes `.networkError` with

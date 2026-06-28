@@ -7,7 +7,7 @@ import _Concurrency   // REQUIRED under Embedded for AsyncStream/Task/Cancellati
 import DNSWire
 import P2PCoreTransport
 import P2PCoreCrypto
-#if !hasFeature(Embedded)
+#if !hasFeature(Embedded) && canImport(Logging)
 import Logging
 #endif
 
@@ -39,13 +39,13 @@ public actor MDNSBrowser {
         /// Network interface name (nil for all interfaces).
         public var networkInterface: String?
 
-        #if !hasFeature(Embedded)
+        #if !hasFeature(Embedded) && canImport(Logging)
         /// Logger for debug output. Host-only: `swift-log`'s `Logger` has no
-        /// Embedded analogue, so the Embedded facade has no logger.
+        /// Embedded/WASI analogue, so those facades have no logger.
         public var logger: Logger?
         #endif
 
-        #if !hasFeature(Embedded)
+        #if !hasFeature(Embedded) && canImport(Logging)
         public init(
             queryInterval: Duration = .seconds(120),
             autoResolve: Bool = true,
@@ -97,7 +97,7 @@ public actor MDNSBrowser {
     private var receiveTask: Task<Void, Never>?
     private var queryTask: Task<Void, Never>?
 
-    #if !hasFeature(Embedded)
+    #if !hasFeature(Embedded) && canImport(Logging)
     private var logger: MDNSLogger? { configuration.logger }
     #else
     private var logger: MDNSLogger? { nil }
@@ -145,19 +145,16 @@ public actor MDNSBrowser {
     /// - Returns: An async sequence of discovered `MDNSService` values.
     @discardableResult
     public func browse(_ serviceType: String) async throws(MDNSError) -> MDNSDiscoveries {
-        let discoveries = ensureDiscoveryStream()
-
         try await ensureStarted()
+        let discoveries = ensureDiscoveryStream()
 
         browsingTypes.insert(serviceType)
         try await sendQuery(for: serviceType)
 
         if queryTask == nil {
             // `weak`/`unowned` are forbidden under Embedded; the host build keeps
-            // the weak capture (so dropping the browser without `stop()` does not
-            // leak via the task→self→task cycle). Under Embedded the spawn is
-            // unreachable at runtime (the transport's `start()` throws above before
-            // we get here), so the strong capture never forms a live cycle.
+            // the weak capture. Embedded callers make lifecycle explicit by
+            // calling `stop()`, which cancels this stored task and releases `self`.
             #if !hasFeature(Embedded)
             queryTask = Task { [weak self] in
                 await self?.runPeriodicQueries()
@@ -175,7 +172,7 @@ public actor MDNSBrowser {
 
     /// Stops the browser and finishes the discovery stream.
     public func stop() async {
-        guard isStarted else { return }
+        let wasStarted = isStarted
         isStarted = false
 
         receiveTask?.cancel()
@@ -184,10 +181,12 @@ public actor MDNSBrowser {
         queryTask?.cancel()
         queryTask = nil
 
-        do {
-            try await transport.shutdown()
-        } catch {
-            logger?.error("MDNSBrowser transport shutdown failed: \(error)")
+        if wasStarted {
+            do {
+                try await transport.shutdown()
+            } catch {
+                logger?.error("MDNSBrowser transport shutdown failed: \(error)")
+            }
         }
 
         discoveryContinuation?.finish()
@@ -229,8 +228,8 @@ public actor MDNSBrowser {
             throw error
         }
 
-        // See the capture-list note in `browse(_:)`: weak on host, strong (and
-        // runtime-unreachable) under Embedded where `weak` is forbidden.
+        // See the capture-list note in `browse(_:)`: weak on host, strong under
+        // Embedded where `weak` is forbidden and lifecycle is explicit.
         #if !hasFeature(Embedded)
         receiveTask = Task { [weak self] in
             guard let self else { return }

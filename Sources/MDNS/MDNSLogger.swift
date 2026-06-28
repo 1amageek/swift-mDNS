@@ -3,8 +3,8 @@
 /// `swift-log`'s `Logging.Logger` is host-only (it imports Foundation), so the
 /// facade addresses logging through `MDNSLogger`:
 ///
-///   host:     MDNSLogger = Logging.Logger   (the real logger)
-///   Embedded: MDNSLogger = a no-op shim with the same `debug/info/error` surface
+///   Logging present: MDNSLogger = Logging.Logger   (the real logger)
+///   no Logging:      MDNSLogger = a no-op shim with the same `debug/info/error` surface
 ///
 /// Both expose `debug` / `info` / `error` taking an `@autoclosure () -> String`,
 /// so every `logger?.debug("…")` call site compiles unchanged in both builds and
@@ -13,7 +13,7 @@
 /// has no Embedded analogue); the internal `logger` accessor returns `nil` under
 /// Embedded, so all logging compiles to nothing.
 
-#if !hasFeature(Embedded)
+#if !hasFeature(Embedded) && canImport(Logging)
 import Logging
 
 /// On host the facade logger is the standard `swift-log` `Logger`.
@@ -21,9 +21,9 @@ typealias MDNSLogger = Logger
 
 #else
 
-/// Embedded no-op logger: the same `debug/info/error` surface as `swift-log`'s
-/// `Logger`, evaluating to nothing. Present only so logging call sites type-check
-/// under Embedded; the internal `logger` accessor is always `nil` there.
+/// No-op logger: the same `debug/info/error` surface as `swift-log`'s `Logger`,
+/// evaluating to nothing. Present so logging call sites type-check where
+/// `swift-log` is not part of the module graph.
 struct MDNSLogger: Sendable {
     @inline(__always) func debug(_ message: @autoclosure () -> String) {}
     @inline(__always) func info(_ message: @autoclosure () -> String) {}

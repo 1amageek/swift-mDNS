@@ -8,6 +8,10 @@ import PackageDescription
 // Span-returning members require `@_lifetime`.
 let embeddedEnabled = Context.environment["P2P_CORE_EMBEDDED"] == "1"
 
+let hostIOPlatforms: [Platform] = [
+    .macOS, .iOS, .tvOS, .watchOS, .visionOS, .linux,
+]
+
 let coreSettings: [SwiftSetting] = {
     var s: [SwiftSetting] = [.enableExperimentalFeature("Lifetimes")]
     if embeddedEnabled {
@@ -16,31 +20,24 @@ let coreSettings: [SwiftSetting] = {
     return s
 }()
 
-// The Tier-1 `MDNS` facade's dependencies. `DNSWire` (the codec), `P2PCoreTransport`
-// (`IPAddress` / `SocketEndpoint`), and `P2PCoreCrypto` (the `AsyncTimer` time+sleep
-// seam) are present in BOTH builds — all three dual-build under `P2P_CORE_EMBEDDED`.
-// The host-only deps (swift-log for logging, swift-nio-udp for the NIO multicast
-// transport) are dropped under Embedded, where the source gates the matching imports
-// behind `#if !hasFeature(Embedded)` and uses the Embedded placeholder transport +
-// the no-op logger shim instead.
-// The package's external dependencies. `swift-p2p-core` (the `IPAddress` /
-// `SocketEndpoint` currency + the `AsyncTimer` seam) is needed in BOTH builds. The
-// host-only packages (swift-log, swift-nio-udp) are dropped under Embedded, where
-// the facade uses the no-op logger shim and the POSIX placeholder transport — this
-// keeps the Embedded module graph minimal and avoids an "unused dependency" warning.
+// The package's external dependencies. `swift-p2p-core` is needed in every build
+// for `IPAddress`, `SocketEndpoint`, and the timer seam. Host packages are present
+// only when the manifest is not building Embedded; their target products are still
+// platform-gated so a WASI target does not compile `swift-log` or `swift-nio-udp`.
+// The Embedded graph adds `swift-p2p-transport` for raw POSIX multicast I/O.
 let packageDependencies: [Package.Dependency] = {
     var d: [Package.Dependency] = [
         // Provides the facade currency type `IPAddress` (Foundation-free, Embedded-clean).
-        .package(url: "https://github.com/1amageek/swift-p2p-core.git", from: "0.1.0"),
+        .package(path: "../swift-p2p-core"),
     ]
     if embeddedEnabled {
         // The Embedded mDNS transport drives the Embedded-clean POSIX multicast
-        // datagram transport (raw sockets, no Foundation/NIO/any). Pulled in ONLY
+        // datagram transport (raw sockets, no Foundation/NIO/any). Pulled in only
         // under Embedded: the host path uses NIO. P2PTransportPOSIX activates its
         // own Embedded build under `P2P_CORE_EMBEDDED=1`, so the whole Embedded
         // module graph stays Embedded-consistent (no non-Embedded import).
         d += [
-            .package(url: "https://github.com/1amageek/swift-p2p-transport.git", from: "0.1.1"),
+            .package(path: "../swift-p2p-transport"),
         ]
     } else {
         d += [
@@ -63,9 +60,19 @@ let mdnsFacadeDependencies: [Target.Dependency] = {
             .product(name: "P2PTransportPOSIX", package: "swift-p2p-transport"),
         ]
     } else {
+        // Host I/O products are excluded for WASI. The package dependencies may
+        // still resolve, but these products are not compiled into the MDNS target.
         d += [
-            .product(name: "Logging", package: "swift-log"),
-            .product(name: "NIOUDPTransport", package: "swift-nio-udp"),
+            .product(
+                name: "NIOUDPTransport",
+                package: "swift-nio-udp",
+                condition: .when(platforms: hostIOPlatforms)
+            ),
+            .product(
+                name: "Logging",
+                package: "swift-log",
+                condition: .when(platforms: hostIOPlatforms)
+            ),
         ]
     }
     return d
@@ -114,17 +121,17 @@ let package = Package(
             path: "Sources/DNSWire",
             swiftSettings: coreSettings
         ),
-        // Tier-1 facade: dual-build (host + Embedded). Browser / responder /
+        // Tier-1 facade: host / Embedded / WASI build. Browser / responder /
         // transport over `[UInt8]` / `MDNSService` / `IPAddress`. The public
         // surface carries no `Data` / `ByteBuffer` / NIO / Foundation types.
         //
         // Host: I/O via NIO (`NIODNSTransport`), logging via swift-log, lock via
-        // `Synchronization.Mutex`, timers via `ContinuousClock`. Embedded: those
-        // host-only deps are dropped (the source gates them behind
-        // `#if !hasFeature(Embedded)`); the transport becomes the no-multicast
-        // `EmbeddedMDNSTransport` placeholder, the lock an `Atomic` spinlock, and
-        // timers the `clock_gettime`-backed `MDNSEmbeddedTimer`. The Embedded build
-        // is `P2P_CORE_EMBEDDED=1 swiftly run +6.3.1 swift build --target MDNS -c release`.
+        // `Synchronization.Mutex`, timers via `ContinuousClock`. Embedded:
+        // raw-POSIX multicast I/O (`EmbeddedMDNSTransport`), no logging, and the
+        // `clock_gettime`-backed timer. WASI: no host I/O products are compiled;
+        // `UnavailableMDNSTransport` makes multicast unavailability explicit.
+        // The Embedded build is
+        // `P2P_CORE_EMBEDDED=1 swiftly run +6.3.1 swift build --target MDNS -c release`.
         .target(
             name: "MDNS",
             dependencies: mdnsFacadeDependencies,

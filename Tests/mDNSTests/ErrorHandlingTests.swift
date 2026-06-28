@@ -16,6 +16,33 @@ private actor FakeMDNSTransport: MDNSTransport {
     func send(_ message: DNSMessage) async throws(MDNSError) {}
 }
 
+private actor FailingStartMDNSTransport: MDNSTransport {
+    let messages: AsyncStream<ReceivedDNSMessage> = AsyncStream { continuation in
+        continuation.finish()
+    }
+
+    private var startCount = 0
+    private var shutdownCount = 0
+    private var sendCount = 0
+
+    func start() async throws(MDNSError) {
+        startCount += 1
+        throw MDNSError.transportUnavailable("start failed")
+    }
+
+    func shutdown() async throws(MDNSError) {
+        shutdownCount += 1
+    }
+
+    func send(_ message: DNSMessage) async throws(MDNSError) {
+        sendCount += 1
+    }
+
+    func counts() -> (start: Int, shutdown: Int, send: Int) {
+        (startCount, shutdownCount, sendCount)
+    }
+}
+
 @Suite("Error Handling - Malformed Message Detection")
 struct ErrorHandlingTests {
 
@@ -258,6 +285,27 @@ struct ErrorHandlingTests {
         }
 
         await responder.stop()
+    }
+
+    @Test("MDNSBrowser resets state when transport start fails")
+    func browserResetsStateWhenTransportStartFails() async {
+        let transport = FailingStartMDNSTransport()
+        let browser = MDNSBrowser(transport: transport)
+
+        await #expect(throws: MDNSError.self) {
+            try await browser.browse("_robot._udp.local.")
+        }
+
+        await browser.stop()
+
+        await #expect(throws: MDNSError.self) {
+            try await browser.browse("_robot._udp.local.")
+        }
+
+        let counts = await transport.counts()
+        #expect(counts.start == 2)
+        #expect(counts.shutdown == 0)
+        #expect(counts.send == 0)
     }
 
     @Test("Truncated TXT record string")

@@ -8,7 +8,8 @@
 /// place that selects which concrete timer the build uses.
 ///
 ///   host  (default):   MDNSDefaultTimer = MDNSHostTimer   (ContinuousClock + Task.sleep)
-///   Embedded (-c rel): MDNSDefaultTimer = MDNSEmbeddedTimer (clock_gettime + park)
+///   Embedded POSIX:    MDNSDefaultTimer = MDNSEmbeddedTimer (clock_gettime + park)
+///   Embedded WASI:     MDNSDefaultTimer = MDNSUnavailableTimer
 ///
 /// The mDNS package defines its own timers (rather than depending on
 /// swift-p2p-transport's `DefaultAsyncTimer`) so the Embedded build is driven by
@@ -30,7 +31,32 @@ extension Duration {
     }
 }
 
-#if !hasFeature(Embedded)
+#if hasFeature(Embedded) && canImport(WASILibc)
+import _Concurrency
+
+/// The Embedded WASI default timer. The default WASI transport fails at start, so
+/// periodic loops never depend on a real clock in this build configuration.
+typealias MDNSDefaultTimer = MDNSUnavailableTimer
+
+struct MDNSUnavailableTimer: AsyncTimer {
+    init() {}
+
+    func monotonicNanos() -> UInt64 {
+        0
+    }
+
+    func monotonicMillis() -> UInt64 {
+        0
+    }
+
+    func sleep(untilNanos deadlineNanos: UInt64) async throws(CancellationError) {
+        if Task.isCancelled {
+            throw CancellationError()
+        }
+    }
+}
+
+#elseif !hasFeature(Embedded)
 import _Concurrency
 
 /// The host default timer: `ContinuousClock` for time, `Task.sleep` for the wait.

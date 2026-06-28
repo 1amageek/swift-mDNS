@@ -15,7 +15,7 @@
 /// typed (`throws(MDNSError)`); the transport's `TransportError` is folded onto
 /// `MDNSError` at this edge with a `bare catch { switch }` (no `as` cast).
 
-#if hasFeature(Embedded)
+#if hasFeature(Embedded) && !canImport(WASILibc)
 
 import _Concurrency   // REQUIRED under Embedded for AsyncStream/async/Task
 import DNSWire
@@ -97,7 +97,7 @@ package final class EmbeddedMDNSTransport: MDNSTransport, Sendable {
             )
         } catch {
             switch error {
-            case .closed, .messageTooLarge, .invalidEndpoint, .ioFailure:
+            case .closed, .messageTooLarge, .invalidEndpoint, .unsupportedPlatform, .ioFailure:
                 return nil
             }
         }
@@ -131,8 +131,9 @@ package final class EmbeddedMDNSTransport: MDNSTransport, Sendable {
                     ipv4Transport, group: Self.ipv4Group, family: AF_INET
                 )
             } catch {
-                state.withLock { $0.isStarted = false }
-                throw Self.mapTransportError(error, context: "IPv4 multicast start")
+                let mapped = Self.mapTransportError(error, context: "IPv4 multicast start")
+                await rollbackStartFailure()
+                throw mapped
             }
             startReceiving(from: ipv4Transport, isIPv4: true)
         }
@@ -143,8 +144,9 @@ package final class EmbeddedMDNSTransport: MDNSTransport, Sendable {
                     ipv6Transport, group: Self.ipv6Group, family: AF_INET6
                 )
             } catch {
-                state.withLock { $0.isStarted = false }
-                throw Self.mapTransportError(error, context: "IPv6 multicast start")
+                let mapped = Self.mapTransportError(error, context: "IPv6 multicast start")
+                await rollbackStartFailure()
+                throw mapped
             }
             startReceiving(from: ipv6Transport, isIPv4: false)
         }
@@ -167,38 +169,7 @@ package final class EmbeddedMDNSTransport: MDNSTransport, Sendable {
     /// Stops the transport: cancels the receive loops, closes the sockets (which
     /// terminates their `incoming` sequences), and finishes `messages`.
     package func shutdown() async throws(MDNSError) {
-        let tasks = state.withLock { state -> (Task<Void, Never>?, Task<Void, Never>?) in
-            state.isStarted = false
-            let v4 = state.ipv4ReceiveTask
-            let v6 = state.ipv6ReceiveTask
-            state.ipv4ReceiveTask = nil
-            state.ipv6ReceiveTask = nil
-            return (v4, v6)
-        }
-
-        tasks.0?.cancel()
-        tasks.1?.cancel()
-
-        // Leaving the group is best-effort; closing the socket drops membership at
-        // the kernel level anyway. Close terminates the `incoming` AsyncSequence so
-        // the receive loops finish.
-        if let ipv4Transport {
-            do {
-                try await ipv4Transport.leaveGroup(Self.ipv4Group)
-            } catch {
-                // Best effort: closing the socket drops membership at the kernel level.
-            }
-            await ipv4Transport.close()
-        }
-        if let ipv6Transport {
-            do {
-                try await ipv6Transport.leaveGroup(Self.ipv6Group)
-            } catch {
-                // Best effort: closing the socket drops membership at the kernel level.
-            }
-            await ipv6Transport.close()
-        }
-
+        await closeTransports()
         messagesContinuation.finish()
     }
 
@@ -242,6 +213,43 @@ package final class EmbeddedMDNSTransport: MDNSTransport, Sendable {
     }
 
     // MARK: - Private
+
+    private func rollbackStartFailure() async {
+        await closeTransports()
+    }
+
+    private func closeTransports() async {
+        let tasks = state.withLock { state -> (Task<Void, Never>?, Task<Void, Never>?) in
+            state.isStarted = false
+            let v4 = state.ipv4ReceiveTask
+            let v6 = state.ipv6ReceiveTask
+            state.ipv4ReceiveTask = nil
+            state.ipv6ReceiveTask = nil
+            return (v4, v6)
+        }
+
+        tasks.0?.cancel()
+        tasks.1?.cancel()
+
+        if let ipv4Transport {
+            await Self.closeTransport(ipv4Transport, group: Self.ipv4Group)
+        }
+        if let ipv6Transport {
+            await Self.closeTransport(ipv6Transport, group: Self.ipv6Group)
+        }
+    }
+
+    private static func closeTransport(
+        _ transport: POSIXMulticastDatagramTransport,
+        group: SocketEndpoint
+    ) async {
+        do {
+            try await transport.leaveGroup(group)
+        } catch {
+            // Best effort: closing the socket drops membership at the kernel level.
+        }
+        await transport.close()
+    }
 
     /// Sends `bytes` to `group`, building the borrowed `Span` at the call boundary
     /// so the borrow never crosses the suspension.
@@ -316,6 +324,8 @@ package final class EmbeddedMDNSTransport: MDNSTransport, Sendable {
             return .networkError("\(context): socket I/O failure")
         case .invalidEndpoint:
             return .networkError("\(context): invalid multicast endpoint")
+        case let .unsupportedPlatform(reason):
+            return .transportUnavailable("\(context): \(reason)")
         case let .messageTooLarge(size, maximum):
             return .networkError("\(context): message too large (\(size) > \(maximum))")
         }

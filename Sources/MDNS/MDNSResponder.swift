@@ -7,7 +7,7 @@ import _Concurrency   // REQUIRED under Embedded for AsyncStream/Task/Cancellati
 import DNSWire
 import P2PCoreTransport
 import P2PCoreCrypto
-#if !hasFeature(Embedded)
+#if !hasFeature(Embedded) && canImport(Logging)
 import Logging
 #endif
 
@@ -49,13 +49,13 @@ public actor MDNSResponder {
         /// Number of announcement retries.
         public var announcementCount: Int
 
-        #if !hasFeature(Embedded)
+        #if !hasFeature(Embedded) && canImport(Logging)
         /// Logger for debug output. Host-only: `swift-log`'s `Logger` has no
-        /// Embedded analogue, so the Embedded facade has no logger.
+        /// Embedded/WASI analogue, so those facades have no logger.
         public var logger: Logger?
         #endif
 
-        #if !hasFeature(Embedded)
+        #if !hasFeature(Embedded) && canImport(Logging)
         public init(
             ttl: UInt32 = mdnsDefaultTTL,
             useIPv4: Bool = true,
@@ -110,7 +110,7 @@ public actor MDNSResponder {
     private var receiveTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
 
-    #if !hasFeature(Embedded)
+    #if !hasFeature(Embedded) && canImport(Logging)
     private var logger: MDNSLogger? { configuration.logger }
     #else
     private var logger: MDNSLogger? { nil }
@@ -185,10 +185,8 @@ public actor MDNSResponder {
 
         if refreshTask == nil {
             // `weak`/`unowned` are forbidden under Embedded; the host build keeps
-            // the weak capture (so dropping the responder without `stop()` does not
-            // leak via the task→self→task cycle). Under Embedded the spawn is
-            // unreachable at runtime (the transport's `start()` throws in
-            // `ensureStarted()` above), so the strong capture never forms a live cycle.
+            // the weak capture. Embedded callers make lifecycle explicit by
+            // calling `stop()`, which cancels this stored task and releases `self`.
             #if !hasFeature(Embedded)
             refreshTask = Task { [weak self] in
                 await self?.runPeriodicRefresh()
@@ -219,11 +217,13 @@ public actor MDNSResponder {
 
     /// Stops the responder, sending a goodbye for every advertised service.
     public func stop() async {
-        guard isStarted else { return }
+        let wasStarted = isStarted
         isStarted = false
 
-        for service in registeredServices.values {
-            await sendGoodbye(for: service)
+        if wasStarted {
+            for service in registeredServices.values {
+                await sendGoodbye(for: service)
+            }
         }
 
         receiveTask?.cancel()
@@ -232,10 +232,12 @@ public actor MDNSResponder {
         refreshTask?.cancel()
         refreshTask = nil
 
-        do {
-            try await transport.shutdown()
-        } catch {
-            logger?.error("MDNSResponder transport shutdown failed: \(error)")
+        if wasStarted {
+            do {
+                try await transport.shutdown()
+            } catch {
+                logger?.error("MDNSResponder transport shutdown failed: \(error)")
+            }
         }
 
         registeredServices.removeAll()
@@ -264,8 +266,8 @@ public actor MDNSResponder {
             throw error
         }
 
-        // See the capture-list note in `advertise(_:)`: weak on host, strong (and
-        // runtime-unreachable) under Embedded where `weak` is forbidden.
+        // See the capture-list note in `advertise(_:)`: weak on host, strong under
+        // Embedded where `weak` is forbidden and lifecycle is explicit.
         #if !hasFeature(Embedded)
         receiveTask = Task { [weak self] in
             guard let self else { return }
@@ -285,6 +287,7 @@ public actor MDNSResponder {
     }
 
     private func currentHostName() -> String {
+        #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
         var buffer = [UInt8](repeating: 0, count: 256)
         let result = buffer.withUnsafeMutableBytes { raw -> Int32 in
             raw.baseAddress!.withMemoryRebound(to: CChar.self, capacity: raw.count) {
@@ -294,9 +297,13 @@ public actor MDNSResponder {
         guard result == 0 else { return "localhost" }
         let nameBytes = Array(buffer.prefix { $0 != 0 })
         return String(decoding: nameBytes, as: UTF8.self)
+        #else
+        return "localhost"
+        #endif
     }
 
     private func resolveLocalAddresses() {
+        #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else { return }
         defer { freeifaddrs(ifaddr) }
@@ -332,6 +339,9 @@ public actor MDNSResponder {
         }
 
         self.hostAddresses = addresses
+        #else
+        hostAddresses = []
+        #endif
     }
 
     private func processQuery(_ message: DNSMessage) async {
